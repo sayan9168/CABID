@@ -31,6 +31,11 @@ from .alerting import (
     send_from_stream_report,
     write_state as write_alert_state,
 )
+from .ebpf import (
+    capabilities as sensor_capabilities,
+    parse_stream as parse_sensor_stream,
+    write_script as write_sensor_script,
+)
 from .filters import FilterError, filter_events
 from .fleet import (
     FleetError,
@@ -245,6 +250,18 @@ def _build_parser() -> argparse.ArgumentParser:
     corpus.add_argument("--refresh", action="store_true", help="re-download even if cached")
     corpus.add_argument("--offline", action="store_true", help="never touch the network")
 
+    ebpf = sub.add_parser(
+        "ebpf",
+        help="kernel sensor: check capability, emit the probe program, parse its output")
+    ebpf.add_argument("action", nargs="?", default="check",
+                      choices=("check", "script", "parse"))
+    ebpf.add_argument("input", nargs="?", help="sensor output file (for 'parse')")
+    ebpf.add_argument("--output", "-o", help="write the script or normalized JSONL here")
+    ebpf.add_argument("--bpftrace", default="bpftrace", help="path to the bpftrace binary")
+    ebpf.add_argument("--keep-errors", action="store_true",
+                      help="record unparseable lines instead of stopping")
+    ebpf.add_argument("--report", help="write a parse summary as JSON")
+
     alert = sub.add_parser(
         "alert",
         help="send findings to Slack, Discord, email or a webhook (dry-run by default)")
@@ -384,6 +401,68 @@ def _load_analyze_events(args) -> tuple[list[dict], dict]:
         events = read_jsonl(args.input[0])
     events, window = filter_events(events, getattr(args, "since", None), getattr(args, "until", None))
     return events, {"sources": sources_block, "time_filter": window}
+
+
+def _cmd_ebpf(args) -> int:
+    if args.action == "check":
+        report = sensor_capabilities(args.bpftrace)
+        print(json.dumps(report, indent=2, sort_keys=True))
+        return 0 if report["available"] else 1
+    if args.action == "script":
+        if not args.output:
+            print("error: --output is required for 'script'", file=sys.stderr)
+            return 2
+        path = write_sensor_script(args.output)
+        print(json.dumps({"script": str(path), "format": "cabid-bpf/1"}, indent=2))
+        return 0
+    if not args.input:
+        print("error: an input file is required for 'parse'", file=sys.stderr)
+        return 2
+    source = Path(args.input)
+    try:
+        lines = source.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    events, errors = [], []
+    for item in parse_sensor_stream(lines, keep_errors=True):
+        if "error" in item:
+            errors.append(item)
+        else:
+            events.append(item)
+    from .normalize import normalize_event
+    normalized, invalid = [], 0
+    for event in events:
+        try:
+            normalized.append(normalize_event(event))
+        except EventError:
+            invalid += 1
+    summary = {
+        "format": "cabid-bpf-parse/1",
+        "input": str(source),
+        "lines": len(lines),
+        "events": len(normalized),
+        "parse_errors": len(errors),
+        "normalize_errors": invalid,
+        "error_examples": errors[:5],
+        "event_types": sorted({event["event_type"] for event in normalized}),
+    }
+    if args.output:
+        destination = Path(args.output)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        with destination.open("w", encoding="utf-8") as handle:
+            for event in normalized:
+                handle.write(json.dumps(event, sort_keys=True) + "\n")
+        summary["output"] = str(destination)
+    if args.report:
+        report_path = Path(args.report)
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        report_path.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n",
+                               encoding="utf-8")
+    print(json.dumps(summary, indent=2, sort_keys=True))
+    if errors and not args.keep_errors:
+        return 1
+    return 0
 
 
 def _cmd_alert(args) -> int:
@@ -1090,6 +1169,8 @@ def main(argv: list[str] | None = None) -> int:
                 report_path.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8")
             print(json.dumps(summary, indent=2, sort_keys=True))
             return 0
+        if args.command == "ebpf":
+            return _cmd_ebpf(args)
         if args.command == "alert":
             return _cmd_alert(args)
         if args.command == "fleet":

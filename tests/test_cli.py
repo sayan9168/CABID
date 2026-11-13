@@ -782,3 +782,50 @@ def test_alert_cli_sends_with_a_fake_env_destination(tmp_path, capsys, monkeypat
     assert receipt["sent"] == 1
     assert sent["payload"]["reason_codes"] == ["telemetry_gap"]
     assert "https://example.com/hook" not in output.read_text(encoding="utf-8")
+
+
+def test_ebpf_cli_check_reports_capability(capsys):
+    # This sandbox cannot run eBPF, so the honest result is exit 1 with reasons.
+    code = main(["ebpf", "check"])
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["format"] == "cabid-bpf/1"
+    assert isinstance(payload["reasons"], list)
+    assert code in (0, 1)
+
+
+def test_ebpf_cli_writes_the_script(tmp_path, capsys):
+    output = tmp_path / "sensor.bt"
+    assert main(["ebpf", "script", "--output", str(output)]) == 0
+    assert "sched_process_exec" in output.read_text(encoding="utf-8")
+    capsys.readouterr()
+
+
+def test_ebpf_cli_script_requires_an_output_path(capsys):
+    assert main(["ebpf", "script"]) == 2
+    assert "--output is required" in capsys.readouterr().err
+
+
+def test_ebpf_cli_parses_sensor_output(tmp_path, capsys):
+    source = tmp_path / "sensor.log"
+    source.write_text("cabid-bpf/1\nexec\t1760000000\t4242\t1\tnginx\t/usr/sbin/nginx\n"
+                      "open\t1760000003\t4242\t4242\tbash\t/etc/passwd\n",
+                      encoding="utf-8")
+    output = tmp_path / "events.jsonl"
+    assert main(["ebpf", "parse", str(source), "--keep-errors", "--output", str(output)]) == 0
+    summary = json.loads(capsys.readouterr().out)
+    assert summary["events"] == 2
+    assert summary["parse_errors"] == 1
+    assert summary["event_types"] == ["file_write", "process_exec"]
+    assert len(output.read_text(encoding="utf-8").strip().splitlines()) == 2
+
+
+def test_ebpf_cli_parse_fails_on_errors_without_keep_errors(tmp_path, capsys):
+    source = tmp_path / "sensor.log"
+    source.write_text("nonsense\n", encoding="utf-8")
+    assert main(["ebpf", "parse", str(source)]) == 1
+    capsys.readouterr()
+
+
+def test_ebpf_cli_parse_requires_an_input(capsys):
+    assert main(["ebpf", "parse"]) == 2
+    assert "input file is required" in capsys.readouterr().err
