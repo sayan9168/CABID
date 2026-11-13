@@ -498,3 +498,60 @@ def test_benchmark_real_cli_runs_on_extracted_corpus(tmp_path, capsys):
     assert report["format"] == "cabid-realworld-benchmark/1"
     assert output.with_suffix(".md").exists()
     assert "not evidence of real-world" in output.with_suffix(".md").read_text(encoding="utf-8")
+
+
+def _benign_jsonl(directory, count=25):
+    """Write one JSONL file per session: a session is a file, as elsewhere in CABID."""
+    from tests.test_calibrate import _benign
+
+    directory.mkdir(parents=True, exist_ok=True)
+    paths = []
+    for name, events in _benign(count):
+        path = directory / f"{name}.jsonl"
+        path.write_text("\n".join(json.dumps(event) for event in events) + "\n",
+                        encoding="utf-8")
+        paths.append(str(path))
+    return paths
+
+
+def test_calibrate_cli_writes_calibration(tmp_path, capsys):
+    sources = _benign_jsonl(tmp_path / "sessions")
+    output = tmp_path / "out" / "calibration.json"
+    assert main(["calibrate", *sources, "--output", str(output)]) == 0
+    payload = json.loads(output.read_text(encoding="utf-8"))
+    assert payload["format"] == "cabid-calibration/1"
+    assert json.loads(capsys.readouterr().out)["thresholds"] == payload["thresholds"]
+
+
+def test_calibrate_cli_can_emit_an_applied_config(tmp_path):
+    sources = _benign_jsonl(tmp_path / "sessions")
+    output = tmp_path / "calibration.json"
+    applied = tmp_path / "config.json"
+    assert main(["calibrate", *sources, "--output", str(output),
+                 "--apply-to", str(applied)]) == 0
+    written = json.loads(applied.read_text(encoding="utf-8"))
+    calibration = json.loads(output.read_text(encoding="utf-8"))
+    assert written["thresholds"] == calibration["thresholds"]
+    assert written["format"] == "cabid-config/1"
+
+
+def test_calibrate_cli_refuses_to_few_sessions(tmp_path, capsys):
+    sources = _benign_jsonl(tmp_path / "sessions", count=3)
+    assert main(["calibrate", *sources, "--output", str(tmp_path / "c.json")]) == 1
+    assert "required" in capsys.readouterr().err
+
+
+def test_calibrate_cli_compare_mode(tmp_path, capsys):
+    calibration = tmp_path / "calibration.json"
+    sources = _benign_jsonl(tmp_path / "sessions")
+    assert main(["calibrate", *sources, "--output", str(calibration)]) == 0
+    capsys.readouterr()
+    assert main(["calibrate", "--compare", str(calibration), sources[0]]) == 0
+    rows = json.loads(capsys.readouterr().out)["comparison"]
+    assert {row["threshold"] for row in rows} == {
+        "suspicious", "high", "rate_per_minute", "burstiness"}
+
+
+def test_calibrate_cli_rejects_missing_input(tmp_path, capsys):
+    assert main(["calibrate", str(tmp_path / "absent.jsonl")]) == 2
+    assert "No such file" in capsys.readouterr().err

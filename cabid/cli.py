@@ -12,6 +12,14 @@ from .aggregate import IngestError, ingest_sources
 from .baseline import build_profile, drift_suggestions, load_profile, write_profile
 from .benchmark import run_benchmark
 from .collector import collect_to_jsonl
+from .calibrate import (
+    CalibrationError,
+    apply_config,
+    calibrate,
+    compare as compare_thresholds,
+    load_calibration,
+    write_calibration,
+)
 from .config import ConfigError, config_template, load_config
 from .corpus import CorpusError, catalogue as corpus_catalogue, fetch as corpus_fetch
 from .detector import analyze, analyze_windows, explain_score, render_score_explanation
@@ -221,6 +229,22 @@ def _build_parser() -> argparse.ArgumentParser:
     corpus.add_argument("--refresh", action="store_true", help="re-download even if cached")
     corpus.add_argument("--offline", action="store_true", help="never touch the network")
 
+    calib = sub.add_parser(
+        "calibrate",
+        help="derive thresholds from benign sessions instead of using hand-picked constants")
+    calib.add_argument("inputs", nargs="+", help="JSONL files containing benign sessions")
+    calib.add_argument("--output", "-o", default="calibration.json")
+    calib.add_argument("--config", "-c", help="analysis configuration JSON")
+    calib.add_argument("--reference-percentile", type=float, default=0.99,
+                       help="benign score percentile used as the suspicious floor")
+    calib.add_argument("--high-percentile", type=float, default=0.999)
+    calib.add_argument("--mad-multiplier", type=float, default=3.0)
+    calib.add_argument("--min-sessions", type=int, default=20)
+    calib.add_argument("--compare", metavar="CALIBRATION",
+                       help="show how a saved calibration moves the current thresholds")
+    calib.add_argument("--apply-to", metavar="CONFIG",
+                       help="write a configuration file with the calibrated thresholds applied")
+
     real = sub.add_parser(
         "benchmark-real",
         help="run the real-world benchmark on a public intrusion corpus")
@@ -278,6 +302,47 @@ def _load_analyze_events(args) -> tuple[list[dict], dict]:
         events = read_jsonl(args.input[0])
     events, window = filter_events(events, getattr(args, "since", None), getattr(args, "until", None))
     return events, {"sources": sources_block, "time_filter": window}
+
+
+def _cmd_calibrate(args) -> int:
+    config = load_config(args.config)
+    if args.compare:
+        try:
+            saved = load_calibration(args.compare)
+        except CalibrationError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        print(json.dumps({"comparison": compare_thresholds(config, saved)},
+                         indent=2, sort_keys=True))
+        return 0
+    sessions = []
+    for raw in args.inputs:
+        path = Path(raw)
+        try:
+            sessions.append((path.name, read_jsonl(path)))
+        except EventError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+    try:
+        result = calibrate(sessions, reference_percentile=args.reference_percentile,
+                           high_percentile=args.high_percentile,
+                           mad_multiplier=args.mad_multiplier,
+                           config=config, minimum_sessions=args.min_sessions)
+        write_calibration(result, args.output)
+        if args.apply_to:
+            applied = apply_config(result, json.loads(json.dumps(config)))
+            applied.update({"$schema": "https://github.com/sayan9168/CABID/blob/main/"
+                                        "docs/configuration.md",
+                            "format": "cabid-config/1"})
+            destination = Path(args.apply_to)
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_text(json.dumps(applied, indent=2, sort_keys=True) + "\n",
+                                   encoding="utf-8")
+    except CalibrationError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    print(json.dumps(result, indent=2, sort_keys=True))
+    return 0
 
 
 def _cmd_corpus(args) -> int:
@@ -782,6 +847,8 @@ def main(argv: list[str] | None = None) -> int:
                 report_path.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8")
             print(json.dumps(summary, indent=2, sort_keys=True))
             return 0
+        if args.command == "calibrate":
+            return _cmd_calibrate(args)
         if args.command == "corpus":
             return _cmd_corpus(args)
         if args.command == "benchmark-real":
