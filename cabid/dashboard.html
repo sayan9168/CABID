@@ -69,6 +69,44 @@
   .err{color:var(--high);font-size:.84rem;margin-top:10px;white-space:pre-wrap}
   .scroll{max-height:420px;overflow:auto}
   #events-preview td{font-family:var(--mono);font-size:11.5px}
+  /* --- interactive tree + timeline --- */
+  .toolbar{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:0 0 12px}
+  .toolbar input[type="search"]{flex:1 1 220px}
+  .toolbar .count{color:var(--muted);font-size:.78rem;white-space:nowrap}
+  .lock{display:inline-flex;align-items:center;gap:6px;color:var(--muted);font-size:.78rem}
+  .lock input{accent-color:var(--accent)}
+  .tree{--indent:16px;font-family:var(--mono);font-size:12px}
+  .tree ul{list-style:none;margin:0;padding:0}
+  .tree li{margin:1px 0}
+  .tree .node{display:flex;align-items:center;gap:7px;padding:3px 7px;border-radius:7px;
+              border:1px solid transparent;cursor:pointer;width:100%;background:none;text-align:left}
+  .tree .node:hover{border-color:#2a3b51;background:#16202e}
+  .tree .node[aria-selected="true"]{border-color:#3b76ff;background:#16233a}
+  .tree .node.deemphasised{opacity:.32}
+  .tree .node.hit{box-shadow:inset 0 0 0 1px var(--high)}
+  .tree .caret{width:12px;color:var(--muted);flex:none}
+  .tree .caret.leaf{visibility:hidden}
+  .tree .pid{color:var(--muted);flex:none;min-width:52px;text-align:right}
+  .tree .name{font-weight:600;overflow-wrap:anywhere}
+  .tree .n{color:var(--muted);flex:none;margin-left:auto;font-family:var(--mono);font-size:11px}
+  .tree .children{padding-left:var(--indent);border-left:1px dashed #22303f;margin-left:6px}
+  .tree .children[hidden]{display:none}
+  .gtooltip{position:fixed;pointer-events:none;z-index:20;background:#0c1420;border:1px solid var(--line);
+            border-radius:8px;padding:7px 10px;font-family:var(--mono);font-size:11.5px;
+            color:var(--ink);opacity:0;transition:opacity .1s;max-width:340px}
+  .gtooltip[data-show="1"]{opacity:1}
+  .timeline{display:flex;align-items:flex-end;gap:1px;height:92px;margin:6px 0 4px;
+            border-bottom:1px solid var(--line)}
+  .timeline i{flex:1;min-width:1px;border-radius:2px 2px 0 0;background:#2e62d4;opacity:.8;
+              transition:opacity .1s}
+  .timeline i:hover{opacity:1;background:var(--accent)}
+  .timeline i.quiet{opacity:.22}
+  .axis{display:flex;justify-content:space-between;color:var(--muted);font-size:.7rem;
+        font-family:var(--mono)}
+  .detail{background:var(--panel-2);border:1px solid var(--line);border-radius:11px;
+          padding:12px 14px;margin-top:14px}
+  .detail h3{margin:0 0 8px;font-size:.8rem;text-transform:uppercase;letter-spacing:.07em;color:var(--muted)}
+  .warn{color:var(--susp);font-size:.8rem;margin:8px 0 0}
   footer{color:var(--muted);font-size:.76rem;text-align:center;padding:0 22px 28px}
   a{color:var(--accent)}
 </style>
@@ -109,6 +147,12 @@
       <button id="sample">Sample</button>
     </div>
     <div class="err" id="error" role="alert"></div>
+    <label>Graph &amp; timeline</label>
+    <p class="hint" style="margin:0 0 8px">Derived from the current input. The graph resolves one parent per
+      pid, the same way the analysis does.</p>
+    <div class="row">
+      <button id="build-graph">Build graph &amp; timeline</button>
+    </div>
     <label>Benchmark</label>
     <div class="row">
       <input id="seed" type="number" value="20261113" aria-label="seed">
@@ -138,6 +182,9 @@
       <button role="tab" aria-selected="false" data-tab="lifecycle">Lifecycle</button>
       <button role="tab" aria-selected="false" data-tab="rules">Rules</button>
       <button role="tab" aria-selected="false" data-tab="tree">Tree</button>
+      <button role="tab" aria-selected="false" data-tab="graph">Process graph</button>
+      <button role="tab" aria-selected="false" data-tab="timeline">Timeline</button>
+      <button role="tab" aria-selected="false" data-tab="filter">Filter</button>
       <button role="tab" aria-selected="false" data-tab="containers">Scopes</button>
       <button role="tab" aria-selected="false" data-tab="entities">Processes</button>
       <button role="tab" aria-selected="false" data-tab="policy">Policy</button>
@@ -148,6 +195,7 @@
     <div class="tabpane" id="pane"><div class="empty">Run an analysis to see the explainable breakdown.</div></div>
   </section>
 </main>
+<div class="gtooltip" id="gtooltip" role="tooltip"></div>
 <footer>CABID is an alpha research prototype. Scores are heuristics, not probabilities; missing telemetry is
 reported as insufficient evidence, never as safe.</footer>
 
@@ -204,6 +252,9 @@ function reasonTable(reasons) {
 function renderTab(tab) {
   const pane = $("pane");
   if (tab === "bench") { pane.innerHTML = benchHtml(); return; }
+  if (tab === "graph") { renderGraphTab(); return; }
+  if (tab === "timeline") { renderTimelineTab(); return; }
+  if (tab === "filter") { renderFilterTab(); return; }
   if (!current) { pane.innerHTML = '<div class="empty">Run an analysis to see the explainable breakdown.</div>'; return; }
   const report = current;
   if (tab === "why") {
@@ -348,6 +399,277 @@ function renderTab(tab) {
       `</table></div>` + (events.length > 400 ? `<p class="hint">Showing the first 400 of ${events.length} lines.</p>` : "");
   }
 }
+
+
+/* ===================== interactive graph, timeline, filter ===================== */
+
+let graphData = null;      // last /api/graph payload
+let graphFilters = {query: "", minimum: 0, lockView: false};
+let selectedPid = null;
+const collapsed = new Set();
+
+function renderGraphTab() {
+  const pane = $("pane");
+  if (!graphData) {
+    pane.innerHTML = '<div class="empty">Build the graph to explore process structure and time.</div>';
+    return;
+  }
+  const graph = graphData;
+  const totalEvents = (graph.nodes || []).reduce((sum, node) => sum + Number(node.events || 0), 0);
+  pane.innerHTML = `
+    <div class="toolbar">
+      <input type="search" id="graph-query" placeholder="filter by process name or pid"
+             aria-label="filter by process name or pid" value="${esc(graphFilters.query)}">
+      <label class="lock"><input type="checkbox" id="graph-min" ${graphFilters.minimum >= 2 ? "checked" : ""}>
+        ≥ 2 events</label>
+      <label class="lock"><input type="checkbox" id="graph-lock" ${graphFilters.lockView ? "checked" : ""}>
+        lock view</label>
+      <span class="count" id="graph-count"></span>
+    </div>
+    ${graph.truncated ? `<p class="warn">Showing ${esc(graph.rendered_nodes)} of
+      ${esc(graph.node_count)} processes; the rest were dropped to keep the view responsive.</p>` : ""}
+    <div class="tree" id="tree"></div>
+    <div class="detail" id="node-detail"><h3>Selected process</h3>
+      <div class="empty" style="padding:2px 0">Click a process to pin its detail.</div></div>
+    <p class="hint" style="margin-top:12px">${esc((graph.notes || []).join(" "))}</p>`;
+
+  const query = $("graph-query");
+  query.addEventListener("input", () => {
+    graphFilters.query = query.value.trim().toLowerCase();
+    paintTree();
+  });
+  $("graph-min").addEventListener("change", (event) => {
+    graphFilters.minimum = event.target.checked ? 2 : 0;
+    paintTree();
+  });
+  $("graph-lock").addEventListener("change", (event) => {
+    graphFilters.lockView = event.target.checked;
+  });
+
+  paintTree();
+  if (selectedPid !== null) showNodeDetail(selectedPid);
+}
+
+function graphMatches(node) {
+  const filter = graphFilters;
+  if (filter.minimum && Number(node.events || 0) < filter.minimum) return false;
+  if (!filter.query) return true;
+  const haystack = (node.name + " " + node.pid).toLowerCase();
+  return haystack.includes(filter.query);
+}
+
+function buildChildMap(graph) {
+  const childrenOf = new Map();
+  for (const node of graph.nodes || []) {
+    const parent = node.parent;
+    const known = parent !== null && parent !== undefined &&
+      (graph.nodes || []).some((candidate) => candidate.pid === parent);
+    const key = known ? parent : null;
+    if (!childrenOf.has(key)) childrenOf.set(key, []);
+    childrenOf.get(key).push(node);
+  }
+  for (const list of childrenOf.values()) list.sort((a, b) => b.events - a.events || a.pid - b.pid);
+  return childrenOf;
+}
+
+function paintTree() {
+  const graph = graphData;
+  if (!graph) return;
+  const childrenOf = buildChildMap(graph);
+  const visible = new Set((graph.nodes || []).filter(graphMatches).map((node) => node.pid));
+  const filtering = Boolean(graphFilters.query) || graphFilters.minimum > 0;
+  const total = (graph.nodes || []).length;
+  // A filter matches an ancestor chain: a process whose own name does not match is
+  // still shown when a descendant does, otherwise a matching child would be invisible
+  // because its parents were filtered out.
+  const keep = new Set(visible);
+  if (filtering) {
+    for (const node of graph.nodes || []) {
+      if (!visible.has(node.pid)) continue;
+      let parent = node.parent;
+      let guard = 0;
+      while (parent !== null && parent !== undefined && guard++ < 200) {
+        keep.add(parent);
+        const ancestor = (graph.nodes || []).find((candidate) => candidate.pid === parent);
+        parent = ancestor ? ancestor.parent : null;
+      }
+    }
+  }
+  const roots = (childrenOf.get(null) || []).filter((node) => keep.has(node.pid));
+  $("graph-count").textContent = filtering
+    ? `${visible.size} matching of ${total} processes`
+    : `${total} process(es), ${graph.edge_count} edge(s)`;
+
+  const renderLevel = (nodes, depth) => {
+    if (!nodes.length) return "";
+    return "<ul>" + nodes.map((node) => {
+      const kids = (childrenOf.get(node.pid) || []).filter((child) => keep.has(child.pid));
+      const open = !collapsed.has(node.pid) || graphFilters.lockView;
+      const classes = ["node"];
+      if (filtering && !visible.has(node.pid)) classes.push("deemphasised");
+      if (filtering && visible.has(node.pid)) classes.push("hit");
+      return `<li>
+        <button class="${classes.join(" ")}" data-pid="${esc(node.pid)}"
+                aria-selected="${selectedPid === node.pid}" type="button">
+          <span class="caret ${kids.length ? "" : "leaf"}">${open ? "▾" : "▸"}</span>
+          <span class="pid">${esc(node.pid)}</span>
+          <span class="name">${esc(node.name)}</span>
+          <span class="n">${esc(node.events)} ev</span>
+        </button>
+        ${kids.length ? `<div class="children" ${open ? "" : "hidden"}>${renderLevel(kids, depth + 1)}</div>` : ""}
+      </li>`;
+    }).join("") + "</ul>";
+  };
+
+  const tree = $("tree");
+  tree.innerHTML = roots.length ? renderLevel(roots, 0)
+    : '<div class="empty">No process matched. Clear the filter to see the whole tree.</div>';
+
+  tree.querySelectorAll(".node").forEach((button) => {
+    button.addEventListener("click", (event) => {
+      const pid = Number(button.dataset.pid);
+      const caret = event.target.classList.contains("caret");
+      if (caret || event.altKey) {
+        if (collapsed.has(pid)) collapsed.delete(pid); else collapsed.add(pid);
+        paintTree();
+        return;
+      }
+      selectedPid = pid;
+      paintTree();
+      showNodeDetail(pid);
+    });
+    button.addEventListener("mousemove", (event) => showTooltip(event, Number(button.dataset.pid)));
+    button.addEventListener("mouseleave", hideTooltip);
+  });
+}
+
+function showTooltip(event, pid) {
+  const node = (graphData.nodes || []).find((candidate) => candidate.pid === pid);
+  if (!node) return;
+  const tip = $("gtooltip");
+  tip.innerHTML = `<strong>${esc(node.name)}</strong><br>pid ${esc(node.pid)}` +
+    `<br>parent ${esc(node.parent ?? "none observed")}<br>${esc(node.events)} event(s)`;
+  tip.dataset.show = "1";
+  const pad = 14;
+  const width = tip.offsetWidth || 180;
+  const left = Math.min(window.innerWidth - width - 8, event.clientX + pad);
+  tip.style.left = left + "px";
+  tip.style.top = Math.max(8, event.clientY - 46) + "px";
+}
+
+function hideTooltip() { $("gtooltip").dataset.show = "0"; }
+
+function showNodeDetail(pid) {
+  const container = $("node-detail");
+  if (!container) return;
+  const graph = graphData;
+  const node = (graph.nodes || []).find((candidate) => candidate.pid === pid);
+  if (!node) { container.innerHTML = '<h3>Selected process</h3><div class="empty">gone</div>'; return; }
+  const children = (graph.nodes || []).filter((candidate) => candidate.parent === pid);
+  const parent = (graph.nodes || []).find((candidate) => candidate.pid === node.parent);
+  container.innerHTML = `<h3>Selected process</h3>
+    <div class="metrics" style="margin:0 0 8px">
+      <div class="metric"><span>Process</span><strong style="font-size:1rem">${esc(node.name)}</strong></div>
+      <div class="metric"><span>PID</span><strong>${esc(node.pid)}</strong></div>
+      <div class="metric"><span>Events</span><strong>${esc(node.events)}</strong></div>
+      <div class="metric"><span>Children</span><strong>${children.length}</strong></div>
+    </div>
+    <p class="hint">Parent: ${parent ? `<code>${esc(parent.name)}</code> (${esc(parent.pid)})` :
+      "not observed in this window"}</p>
+    ${children.length ? "<table><tr><th>Child</th><th>PID</th><th>Events</th></tr>" +
+      children.map((child) => `<tr><td>${esc(child.name)}</td><td>${esc(child.pid)}</td>` +
+        `<td>${esc(child.events)}</td></tr>`).join("") + "</table>"
+      : '<p class="hint">No observed children.</p>'}`;
+}
+
+function renderTimelineTab() {
+  const pane = $("pane");
+  if (!graphData) {
+    pane.innerHTML = '<div class="empty">Build the timeline to see event density over time.</div>';
+    return;
+  }
+  const graph = graphData;
+  const bins = graph.bins || [];
+  if (!bins.length) { pane.innerHTML = '<div class="empty">No events in this window.</div>'; return; }
+  const peak = Math.max(...bins.map((bin) => bin.count));
+  const median = [...bins.map((bin) => bin.count)].sort((a, b) => a - b)[Math.floor(bins.length / 2)];
+  const bars = bins.map((bin, index) => {
+    const height = Math.max(2, (bin.count / (peak || 1)) * 100);
+    const quiet = bin.count <= median / 2;
+    return `<i class="${quiet ? "quiet" : ""}" style="height:${height.toFixed(1)}%"
+      title="bin ${index} · ${new Date(bin.start * 1000).toISOString()} · ${bin.count} event(s)"></i>`;
+  }).join("");
+  const format = (stamp) => new Date(stamp * 1000).toISOString().replace("T", " ").replace(".000Z", "Z");
+  pane.innerHTML = `
+    <div class="timeline" role="img" aria-label="event density over time">${bars}</div>
+    <div class="axis"><span>${esc(format(graph.window.start))}</span>
+      <span>${esc(format(graph.window.end))}</span></div>
+    <div class="metrics" style="margin-top:14px">
+      <div class="metric"><span>Window</span><strong>${fmt(graph.window.seconds, 0)}s</strong></div>
+      <div class="metric"><span>Bins</span><strong>${bins.length}</strong></div>
+      <div class="metric"><span>Peak bin</span><strong>${peak}</strong></div>
+      <div class="metric"><span>Median bin</span><strong>${median}</strong></div>
+    </div>
+    <p class="hint">Bars show event density per bin, not a score. A tall bar is activity, and
+      activity alone is not a finding. Faded bars are at or below half the median.</p>`;
+}
+
+function renderFilterTab() {
+  const pane = $("pane");
+  if (!graphData) {
+    pane.innerHTML = '<div class="empty">Build the graph first: filters apply to the derived structure.</div>';
+    return;
+  }
+  const graph = graphData;
+  const byName = new Map();
+  for (const node of graph.nodes || []) {
+    const entry = byName.get(node.name) || {name: node.name, pids: 0, events: 0};
+    entry.pids += 1;
+    entry.events += Number(node.events || 0);
+    byName.set(node.name, entry);
+  }
+  const rows = [...byName.values()].sort((a, b) => b.events - a.events);
+  const totalEvents = rows.reduce((sum, row) => sum + row.events, 0) || 1;
+  pane.innerHTML = `<p class="hint">Name-level rollup of the current input. Click a row to filter the
+    process graph by that name.</p>
+    <div class="scroll"><table><tr><th>Process name</th><th>PIDs</th><th>Events</th><th>Share</th></tr>` +
+    rows.map((row) => `<tr data-name="${esc(row.name)}" style="cursor:pointer">
+      <td><code>${esc(row.name)}</code></td><td>${row.pids}</td><td>${row.events}</td>
+      <td><div class="bar" style="width:110px"><i style="width:${((row.events / totalEvents) * 100).toFixed(1)}%"></i></div></td>
+    </tr>`).join("") + "</table></div>";
+  pane.querySelectorAll("tr[data-name]").forEach((row) => {
+    row.addEventListener("click", () => {
+      graphFilters.query = row.dataset.name.toLowerCase();
+      document.querySelectorAll(".tabs button").forEach((other) =>
+        other.setAttribute("aria-selected", String(other.dataset.tab === "graph")));
+      renderTab("graph");
+    });
+  });
+}
+
+async function buildGraph() {
+  showError("");
+  const body = { events: $("events").value };
+  if ($("since").value.trim()) body.since = $("since").value.trim();
+  if ($("until").value.trim()) body.until = $("until").value.trim();
+  try {
+    $("build-graph").disabled = true;
+    graphData = await api("/api/graph", {
+      method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body),
+    });
+    selectedPid = null;
+    collapsed.clear();
+    document.querySelectorAll(".tabs button").forEach((other) =>
+      other.setAttribute("aria-selected", String(other.dataset.tab === "graph")));
+    renderTab("graph");
+  } catch (err) {
+    showError(err.message);
+  } finally {
+    $("build-graph").disabled = false;
+  }
+}
+
+$("build-graph").addEventListener("click", buildGraph);
 
 function statusColor(status) {
   return {HIGH_RISK: "#ff6b6b", SUSPICIOUS: "#ffb347", INSUFFICIENT_EVIDENCE: "#6fa8ff",

@@ -463,3 +463,369 @@ def test_apply_writes_an_audit_trail(tmp_path, capsys):
     entries = [json.loads(line) for line in audit.read_text().splitlines()]
     assert entries[0]["event"] == "plan_start"
     assert entries[-1]["event"] == "plan_end"
+
+
+def test_corpus_list_cli_prints_pinned_digests(capsys):
+    assert main(["corpus", "list"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["corpora"][0]["name"] == "adfa-ld"
+
+
+def test_corpus_cli_requires_a_name_for_fetch(capsys):
+    assert main(["corpus", "fetch"]) == 2
+    assert "corpus name" in capsys.readouterr().err
+
+
+def test_corpus_cli_reports_missing_cache_without_network(tmp_path, capsys):
+    assert main(["corpus", "fetch", "adfa-ld", "--cache", str(tmp_path), "--offline"]) == 1
+    assert "offline" in capsys.readouterr().err
+
+
+def test_benchmark_real_cli_errors_when_corpus_absent(tmp_path, capsys):
+    assert main(["benchmark-real", "--corpus-cache", str(tmp_path)]) == 1
+    err = capsys.readouterr().err
+    assert "cabid corpus fetch adfa-ld" in err
+
+
+def test_benchmark_real_cli_runs_on_extracted_corpus(tmp_path, capsys):
+    from tests.test_realworld import _write_tree
+
+    root = _write_tree(tmp_path / "corpus")
+    output = tmp_path / "out" / "real.json"
+    assert main(["benchmark-real", "--corpus-root", str(root), "--output", str(output),
+                 "--format", "md"]) == 0
+    report = json.loads(output.read_text(encoding="utf-8"))
+    assert report["format"] == "cabid-realworld-benchmark/1"
+    assert output.with_suffix(".md").exists()
+    assert "not evidence of real-world" in output.with_suffix(".md").read_text(encoding="utf-8")
+
+
+def _benign_jsonl(directory, count=25):
+    """Write one JSONL file per session: a session is a file, as elsewhere in CABID."""
+    from tests.test_calibrate import _benign
+
+    directory.mkdir(parents=True, exist_ok=True)
+    paths = []
+    for name, events in _benign(count):
+        path = directory / f"{name}.jsonl"
+        path.write_text("\n".join(json.dumps(event) for event in events) + "\n",
+                        encoding="utf-8")
+        paths.append(str(path))
+    return paths
+
+
+def test_calibrate_cli_writes_calibration(tmp_path, capsys):
+    sources = _benign_jsonl(tmp_path / "sessions")
+    output = tmp_path / "out" / "calibration.json"
+    assert main(["calibrate", *sources, "--output", str(output)]) == 0
+    payload = json.loads(output.read_text(encoding="utf-8"))
+    assert payload["format"] == "cabid-calibration/1"
+    assert json.loads(capsys.readouterr().out)["thresholds"] == payload["thresholds"]
+
+
+def test_calibrate_cli_can_emit_an_applied_config(tmp_path):
+    sources = _benign_jsonl(tmp_path / "sessions")
+    output = tmp_path / "calibration.json"
+    applied = tmp_path / "config.json"
+    assert main(["calibrate", *sources, "--output", str(output),
+                 "--apply-to", str(applied)]) == 0
+    written = json.loads(applied.read_text(encoding="utf-8"))
+    calibration = json.loads(output.read_text(encoding="utf-8"))
+    assert written["thresholds"] == calibration["thresholds"]
+    assert written["format"] == "cabid-config/1"
+
+
+def test_calibrate_cli_refuses_to_few_sessions(tmp_path, capsys):
+    sources = _benign_jsonl(tmp_path / "sessions", count=3)
+    assert main(["calibrate", *sources, "--output", str(tmp_path / "c.json")]) == 1
+    assert "required" in capsys.readouterr().err
+
+
+def test_calibrate_cli_compare_mode(tmp_path, capsys):
+    calibration = tmp_path / "calibration.json"
+    sources = _benign_jsonl(tmp_path / "sessions")
+    assert main(["calibrate", *sources, "--output", str(calibration)]) == 0
+    capsys.readouterr()
+    assert main(["calibrate", "--compare", str(calibration), sources[0]]) == 0
+    rows = json.loads(capsys.readouterr().out)["comparison"]
+    assert {row["threshold"] for row in rows} == {
+        "suspicious", "high", "rate_per_minute", "burstiness"}
+
+
+def test_calibrate_cli_rejects_missing_input(tmp_path, capsys):
+    assert main(["calibrate", str(tmp_path / "absent.jsonl")]) == 2
+    assert "No such file" in capsys.readouterr().err
+
+
+def test_validate_baseline_cli_reports_a_verdict(tmp_path, capsys):
+    from cabid.baseline import build_profile, write_profile
+    from tests.test_novelty import _sessions
+
+    profile = build_profile(_sessions(40, prefix="fit"), minimum_sessions=3)
+    profile_path = write_profile(profile, tmp_path / "profile.json")
+    sources = []
+    for name, events in _sessions(30, prefix="held"):
+        path = tmp_path / f"{name}.jsonl"
+        path.write_text("\n".join(json.dumps(event) for event in events) + "\n",
+                        encoding="utf-8")
+        sources.append(str(path))
+    output = tmp_path / "validation.json"
+    assert main(["validate-baseline", str(profile_path), *sources,
+                 "--output", str(output)]) == 0
+    report = json.loads(output.read_text(encoding="utf-8"))
+    assert report["verdict"] in {"SOUND", "NEEDS_REFIT"}
+    assert json.loads(capsys.readouterr().out)["verdict"] == report["verdict"]
+
+
+def test_validate_baseline_cli_errors_on_too_few_sessions(tmp_path, capsys):
+    from cabid.baseline import build_profile, write_profile
+    from tests.test_novelty import _sessions
+
+    profile = build_profile(_sessions(40, prefix="fit"), minimum_sessions=3)
+    profile_path = write_profile(profile, tmp_path / "profile.json")
+    name, events = _sessions(1, prefix="held")[0]
+    source = tmp_path / "one.jsonl"
+    source.write_text("\n".join(json.dumps(event) for event in events) + "\n",
+                      encoding="utf-8")
+    assert main(["validate-baseline", str(profile_path), str(source)]) == 1
+    assert "required" in capsys.readouterr().err
+
+
+def test_drift_report_cli_detects_a_rate_change(tmp_path, capsys):
+    from cabid.baseline import build_profile, write_profile
+    from tests.test_novelty import _sessions
+
+    profile = build_profile(_sessions(40, prefix="fit", duration=600.0),
+                            minimum_sessions=3)
+    profile_path = write_profile(profile, tmp_path / "profile.json")
+    sources = []
+    for name, events in _sessions(30, prefix="fast", duration=60.0):
+        path = tmp_path / f"{name}.jsonl"
+        path.write_text("\n".join(json.dumps(event) for event in events) + "\n",
+                        encoding="utf-8")
+        sources.append(str(path))
+    output = tmp_path / "drift.json"
+    assert main(["drift-report", str(profile_path), *sources, "--output", str(output)]) == 0
+    report = json.loads(output.read_text(encoding="utf-8"))
+    assert report["drifted"] is True
+    assert "not about intent" in report["drift_is_not_an_attack_signal"]
+
+
+def test_analyze_stream_cli_reports_throughput(tmp_path, capsys):
+    from tests.test_streaming import _events
+
+    source = tmp_path / "stream.jsonl"
+    source.write_text("\n".join(json.dumps(event) for event in _events(120)) + "\n",
+                      encoding="utf-8")
+    output = tmp_path / "out" / "stream.json"
+    assert main(["analyze-stream", str(source), "--window-seconds", "60",
+                 "--output", str(output)]) == 0
+    report = json.loads(output.read_text(encoding="utf-8"))
+    assert report["format"] == "cabid-stream-report/1"
+    assert report["events_normalized"] == 120
+    assert json.loads(capsys.readouterr().out)["window_count"] == report["window_count"]
+
+
+def test_analyze_stream_cli_rejects_a_tiny_window(tmp_path, capsys):
+    source = tmp_path / "stream.jsonl"
+    source.write_text(json.dumps({"timestamp": 1.0, "event_type": "file_write",
+                                  "process_id": 1}) + "\n", encoding="utf-8")
+    assert main(["analyze-stream", str(source), "--window-seconds", "1"]) == 1
+    assert "at least" in capsys.readouterr().err
+
+
+def test_fleet_cli_collects_and_marks_silence(tmp_path, capsys):
+    first = tmp_path / "a.json"
+    first.write_text(json.dumps({"status": "HIGH_RISK", "anomaly_score": 0.9,
+                                 "event_count": 10,
+                                 "completeness": {"completeness": 1.0},
+                                 "reasons": [{"code": "temporal_rate_or_burst"}]}),
+                     encoding="utf-8")
+    expected = tmp_path / "expected.txt"
+    expected.write_text("web-01\nweb-02\n", encoding="utf-8")
+    output = tmp_path / "fleet.json"
+    assert main(["fleet", f"web-01={first}", "--expected", str(expected),
+                 "--output", str(output)]) == 0
+    report = json.loads(output.read_text(encoding="utf-8"))
+    assert report["silent_hosts"] == ["web-02"]
+    assert report["degraded"] is True
+    capsys.readouterr()
+
+
+def test_fleet_cli_renders_markdown(tmp_path, capsys):
+    source = tmp_path / "a.json"
+    source.write_text(json.dumps({"status": "NO_ANOMALY_DETECTED", "anomaly_score": 0.01,
+                                  "event_count": 5,
+                                  "completeness": {"completeness": 1.0},
+                                  "reasons": []}), encoding="utf-8")
+    assert main(["fleet", f"web-01={source}", "--format", "md"]) == 0
+    assert "# CABID fleet report" in capsys.readouterr().out
+
+
+def test_fleet_cli_rejects_a_malformed_pair(tmp_path, capsys):
+    assert main(["fleet", "no-equals-sign"]) == 1
+    assert "HOST=REPORT.json" in capsys.readouterr().err
+
+
+def test_fleet_cli_compare_requires_both_snapshots(tmp_path, capsys):
+    source = tmp_path / "a.json"
+    source.write_text(json.dumps({"status": "NO_ANOMALY_DETECTED", "anomaly_score": 0.0,
+                                  "event_count": 1, "completeness": {"completeness": 1.0},
+                                  "reasons": []}), encoding="utf-8")
+    assert main(["fleet", "--compare", "--baseline", f"web-01={source}"]) == 1
+    assert "--baseline and --current" in capsys.readouterr().err
+
+
+def test_fleet_cli_compare_reports_a_regression(tmp_path, capsys):
+    before = tmp_path / "before.json"
+    before.write_text(json.dumps({"status": "NO_ANOMALY_DETECTED", "anomaly_score": 0.1,
+                                  "event_count": 1,
+                                  "completeness": {"completeness": 1.0}, "reasons": []}),
+                      encoding="utf-8")
+    after = tmp_path / "after.json"
+    after.write_text(json.dumps({"status": "HIGH_RISK", "anomaly_score": 0.9,
+                                 "event_count": 1,
+                                 "completeness": {"completeness": 1.0}, "reasons": []}),
+                     encoding="utf-8")
+    assert main(["fleet", "--compare", "--baseline", f"web-01={before}",
+                 "--current", f"web-01={after}"]) == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report["worsened"][0]["host"] == "web-01"
+
+
+def test_alert_cli_defaults_to_a_dry_run(tmp_path, capsys, monkeypatch):
+    monkeypatch.delenv("CABID_SLACK_WEBHOOK", raising=False)
+    report = tmp_path / "r.json"
+    report.write_text(json.dumps({"status": "HIGH_RISK", "anomaly_score": 0.9,
+                                  "event_count": 100,
+                                  "reasons": [{"code": "temporal_rate_or_burst",
+                                               "detail": "rate exceeded"}]}),
+                      encoding="utf-8")
+    assert main(["alert", str(report), "--channel", "slack", "--host", "web-01"]) == 0
+    receipt = json.loads(capsys.readouterr().out)
+    assert receipt["dry_run"] is True
+    assert receipt["sent"] == 1
+    assert "HIGH_RISK" in receipt["preview"][0]["text"]
+
+
+def test_alert_cli_rejects_an_unknown_report_file(tmp_path, capsys):
+    assert main(["alert", str(tmp_path / "absent.json"), "--channel", "slack"]) == 1
+    assert "error" in capsys.readouterr().err
+
+
+def test_alert_cli_rejects_a_non_object_report(tmp_path, capsys):
+    report = tmp_path / "r.json"
+    report.write_text("[]", encoding="utf-8")
+    assert main(["alert", str(report), "--channel", "slack"]) == 1
+    assert "JSON object" in capsys.readouterr().err
+
+
+def test_alert_cli_state_file_persists_suppression(tmp_path, capsys, monkeypatch):
+    monkeypatch.delenv("CABID_SLACK_WEBHOOK", raising=False)
+    report = tmp_path / "r.json"
+    report.write_text(json.dumps({"status": "HIGH_RISK", "anomaly_score": 0.9,
+                                  "event_count": 100,
+                                  "reasons": [{"code": "temporal_rate_or_burst"}]}),
+                      encoding="utf-8")
+    state = tmp_path / "state.json"
+    args = ["alert", str(report), "--channel", "slack", "--host", "h", "--state", str(state)]
+    # With no destination, delivery fails but the receipt records it and the command
+    # itself succeeds; a failed channel is an operational fact, not a CLI error.
+    assert main([*args, "--send"]) == 0
+    failed = json.loads(capsys.readouterr().out)
+    assert failed["sent"] == 0
+    assert failed["errors"]
+    assert not state.exists() or json.loads(state.read_text(encoding="utf-8"))["total_sent"] == 0
+    assert main(args) == 0
+    receipt = json.loads(capsys.readouterr().out)
+    assert receipt["dry_run"] is True
+    assert receipt["preview"]
+
+
+def test_alert_cli_persists_state_and_suppresses_on_the_next_run(tmp_path, capsys, monkeypatch):
+    monkeypatch.setenv("CABID_WEBHOOK_URL", "https://example.com/hook")
+    monkeypatch.setattr("cabid.alerting.UrllibTransport.post_json",
+                        lambda self, url, payload, timeout: 200)
+    report = tmp_path / "r.json"
+    report.write_text(json.dumps({"status": "HIGH_RISK", "anomaly_score": 0.9,
+                                  "event_count": 100,
+                                  "reasons": [{"code": "temporal_rate_or_burst"}]}),
+                      encoding="utf-8")
+    state = tmp_path / "state.json"
+    args = ["alert", str(report), "--channel", "webhook", "--host", "h",
+            "--state", str(state), "--send"]
+    assert main(args) == 0
+    assert json.loads(capsys.readouterr().out)["sent"] == 1
+    assert main(args) == 0
+    assert json.loads(capsys.readouterr().out)["suppressed"]["duplicate_within_window"] == 1
+
+
+def test_alert_cli_sends_with_a_fake_env_destination(tmp_path, capsys, monkeypatch):
+    sent = {}
+
+    def fake_post(self, url, payload, timeout):
+        sent["url"] = url
+        sent["payload"] = payload
+        return 200
+
+    monkeypatch.setenv("CABID_WEBHOOK_URL", "https://example.com/hook")
+    monkeypatch.setattr("cabid.alerting.UrllibTransport.post_json", fake_post)
+    report = tmp_path / "r.json"
+    report.write_text(json.dumps({"status": "SUSPICIOUS", "anomaly_score": 0.6,
+                                  "event_count": 10,
+                                  "reasons": [{"code": "telemetry_gap"}]}),
+                      encoding="utf-8")
+    output = tmp_path / "receipt.json"
+    assert main(["alert", str(report), "--channel", "webhook", "--host", "h",
+                 "--send", "--output", str(output)]) == 0
+    receipt = json.loads(output.read_text(encoding="utf-8"))
+    assert receipt["sent"] == 1
+    assert sent["payload"]["reason_codes"] == ["telemetry_gap"]
+    assert "https://example.com/hook" not in output.read_text(encoding="utf-8")
+
+
+def test_ebpf_cli_check_reports_capability(capsys):
+    # This sandbox cannot run eBPF, so the honest result is exit 1 with reasons.
+    code = main(["ebpf", "check"])
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["format"] == "cabid-bpf/1"
+    assert isinstance(payload["reasons"], list)
+    assert code in (0, 1)
+
+
+def test_ebpf_cli_writes_the_script(tmp_path, capsys):
+    output = tmp_path / "sensor.bt"
+    assert main(["ebpf", "script", "--output", str(output)]) == 0
+    assert "sched_process_exec" in output.read_text(encoding="utf-8")
+    capsys.readouterr()
+
+
+def test_ebpf_cli_script_requires_an_output_path(capsys):
+    assert main(["ebpf", "script"]) == 2
+    assert "--output is required" in capsys.readouterr().err
+
+
+def test_ebpf_cli_parses_sensor_output(tmp_path, capsys):
+    source = tmp_path / "sensor.log"
+    source.write_text("cabid-bpf/1\nexec\t1760000000\t4242\t1\tnginx\t/usr/sbin/nginx\n"
+                      "open\t1760000003\t4242\t4242\tbash\t/etc/passwd\n",
+                      encoding="utf-8")
+    output = tmp_path / "events.jsonl"
+    assert main(["ebpf", "parse", str(source), "--keep-errors", "--output", str(output)]) == 0
+    summary = json.loads(capsys.readouterr().out)
+    assert summary["events"] == 2
+    assert summary["parse_errors"] == 1
+    assert summary["event_types"] == ["file_write", "process_exec"]
+    assert len(output.read_text(encoding="utf-8").strip().splitlines()) == 2
+
+
+def test_ebpf_cli_parse_fails_on_errors_without_keep_errors(tmp_path, capsys):
+    source = tmp_path / "sensor.log"
+    source.write_text("nonsense\n", encoding="utf-8")
+    assert main(["ebpf", "parse", str(source)]) == 1
+    capsys.readouterr()
+
+
+def test_ebpf_cli_parse_requires_an_input(capsys):
+    assert main(["ebpf", "parse"]) == 2
+    assert "input file is required" in capsys.readouterr().err

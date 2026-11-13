@@ -12,19 +12,50 @@ from .aggregate import IngestError, ingest_sources
 from .baseline import build_profile, drift_suggestions, load_profile, write_profile
 from .benchmark import run_benchmark
 from .collector import collect_to_jsonl
+from .calibrate import (
+    CalibrationError,
+    apply_config,
+    calibrate,
+    compare as compare_thresholds,
+    load_calibration,
+    write_calibration,
+)
 from .config import ConfigError, config_template, load_config
+from .corpus import CorpusError, catalogue as corpus_catalogue, fetch as corpus_fetch
 from .detector import analyze, analyze_windows, explain_score, render_score_explanation
+from .alerting import (
+    CHANNELS as ALERT_CHANNELS,
+    AlertError,
+    load_state as load_alert_state,
+    send as send_alerts,
+    send_from_stream_report,
+    write_state as write_alert_state,
+)
+from .ebpf import (
+    capabilities as sensor_capabilities,
+    parse_stream as parse_sensor_stream,
+    write_script as write_sensor_script,
+)
 from .filters import FilterError, filter_events
+from .fleet import (
+    FleetError,
+    collect as collect_fleet,
+    compare as compare_fleets,
+    render_markdown as render_fleet_markdown,
+)
 from .explain import FORMATS, render, render_json
 from .history import DEFAULT_DB, HistoryError, compare_runs, list_runs, record_run
 from .ingest import normalize_many, read_jsonl
 from .normalize import EventError
+from .novelty import NoveltyError, drift as drift_report, validate as validate_baseline
 from .policy import PolicyError, evaluate_policy, load_policy
+from .realworld import run_adfa_benchmark
 from .rules import RuleError, load_rules
 from .executor import ExecutionError, dry_run, execute_plan
 from .response import ACTIONS, ResponseError, build_plan, render_plan, write_plan
 from .sigma import SigmaError, import_sigma
 from .stix import build_bundle, write_bundle
+from .streaming import StreamError, stream_file
 from .signature import SealError, seal_report, sign_file, verify_file
 from .timeline import build_timeline, render_timeline_markdown, render_timeline_text
 from .watch import watch_file
@@ -212,6 +243,123 @@ def _build_parser() -> argparse.ArgumentParser:
                          help="audit trail for --apply (default: alongside the report)")
     respond.add_argument("--quiet", "-q", action="store_true")
 
+    corpus = sub.add_parser("corpus", help="list, fetch or verify public benchmark corpora")
+    corpus.add_argument("action", nargs="?", choices=("list", "fetch", "verify"), default="list")
+    corpus.add_argument("name", nargs="?", help="corpus name (see 'cabid corpus list')")
+    corpus.add_argument("--cache", help="cache directory (default: $CABID_CACHE or ~/.cache/cabid)")
+    corpus.add_argument("--refresh", action="store_true", help="re-download even if cached")
+    corpus.add_argument("--offline", action="store_true", help="never touch the network")
+
+    ebpf = sub.add_parser(
+        "ebpf",
+        help="kernel sensor: check capability, emit the probe program, parse its output")
+    ebpf.add_argument("action", nargs="?", default="check",
+                      choices=("check", "script", "parse"))
+    ebpf.add_argument("input", nargs="?", help="sensor output file (for 'parse')")
+    ebpf.add_argument("--output", "-o", help="write the script or normalized JSONL here")
+    ebpf.add_argument("--bpftrace", default="bpftrace", help="path to the bpftrace binary")
+    ebpf.add_argument("--keep-errors", action="store_true",
+                      help="record unparseable lines instead of stopping")
+    ebpf.add_argument("--report", help="write a parse summary as JSON")
+
+    alert = sub.add_parser(
+        "alert",
+        help="send findings to Slack, Discord, email or a webhook (dry-run by default)")
+    alert.add_argument("reports", nargs="+", help="report JSON files (session or stream)")
+    alert.add_argument("--channel", "-C", choices=ALERT_CHANNELS, required=True)
+    alert.add_argument("--host", help="host label recorded in the alert")
+    alert.add_argument("--minimum", choices=("SUSPICIOUS", "HIGH_RISK", "INSUFFICIENT_EVIDENCE"),
+                       default="SUSPICIOUS")
+    alert.add_argument("--quiet-seconds", type=float, default=1800.0,
+                       help="suppress a repeat of the same finding within this window")
+    alert.add_argument("--state", help="JSON file holding suppression state between runs")
+    alert.add_argument("--max-per-run", type=int, default=20)
+    alert.add_argument("--dashboard-url", help="link included in the alert text")
+    alert.add_argument("--email-from", help="sender address (email channel)")
+    alert.add_argument("--email-to", help="recipient address (email channel)")
+    alert.add_argument("--smtp-host", help="SMTP host (email channel)")
+    alert.add_argument("--smtp-port", type=int, default=587)
+    alert.add_argument("--smtp-user", help="SMTP username (email channel)")
+    alert.add_argument("--no-tls", action="store_true", help="skip STARTTLS (discouraged)")
+    alert.add_argument("--send", action="store_true",
+                       help="actually deliver; without this the command is a dry run")
+    alert.add_argument("--output", "-o", help="write the receipt as JSON")
+
+    fleet = sub.add_parser(
+        "fleet",
+        help="aggregate or compare reports across many hosts")
+    fleet.add_argument("pairs", nargs="*", metavar="HOST=REPORT.json",
+                       help="one HOST=REPORT.json argument per host")
+    fleet.add_argument("--compare", action="store_true",
+                       help="compare two snapshots instead of collecting one")
+    fleet.add_argument("--expected", help="file listing expected host names, one per line")
+    fleet.add_argument("--baseline", metavar="HOST=REPORT",
+                       help="baseline snapshot for compare (repeat by comma)")
+    fleet.add_argument("--current", metavar="HOST=REPORT",
+                       help="current snapshot for compare (repeat by comma)")
+    fleet.add_argument("--format", "-f", choices=("json", "md"), default="json")
+    fleet.add_argument("--output", "-o", help="write the fleet report")
+
+    astream = sub.add_parser(
+        "analyze-stream",
+        help="score a JSONL stream window by window with bounded memory")
+    astream.add_argument("input", help="JSONL event stream")
+    astream.add_argument("--window-seconds", type=float, default=60.0)
+    astream.add_argument("--config", "-c", help="analysis configuration JSON")
+    astream.add_argument("--baseline", "-b", help="baseline profile JSON")
+    astream.add_argument("--sample-limit", type=int, default=2000)
+    astream.add_argument("--output", "-o", help="write the stream report as JSON")
+
+    val = sub.add_parser(
+        "validate-baseline",
+        help="audit a baseline profile against held-out benign sessions")
+    val.add_argument("profile", help="baseline profile JSON")
+    val.add_argument("inputs", nargs="+", help="held-out benign JSONL sessions")
+    val.add_argument("--min-sessions", type=int, default=20)
+    val.add_argument("--novelty-cutoff", type=float, default=0.25)
+    val.add_argument("--output", "-o", help="write the validation report as JSON")
+
+    drf = sub.add_parser(
+        "drift-report",
+        help="compare recent benign sessions against a baseline and propose updates")
+    drf.add_argument("profile", help="baseline profile JSON")
+    drf.add_argument("inputs", nargs="+", help="recent benign JSONL sessions")
+    drf.add_argument("--threshold", type=float, default=0.30)
+    drf.add_argument("--novelty-cutoff", type=float, default=0.25)
+    drf.add_argument("--output", "-o", help="write the drift report as JSON")
+
+    calib = sub.add_parser(
+        "calibrate",
+        help="derive thresholds from benign sessions instead of using hand-picked constants")
+    calib.add_argument("inputs", nargs="+", help="JSONL files containing benign sessions")
+    calib.add_argument("--output", "-o", default="calibration.json")
+    calib.add_argument("--config", "-c", help="analysis configuration JSON")
+    calib.add_argument("--reference-percentile", type=float, default=0.99,
+                       help="benign score percentile used as the suspicious floor")
+    calib.add_argument("--high-percentile", type=float, default=0.999)
+    calib.add_argument("--mad-multiplier", type=float, default=3.0)
+    calib.add_argument("--min-sessions", type=int, default=20)
+    calib.add_argument("--compare", metavar="CALIBRATION",
+                       help="show how a saved calibration moves the current thresholds")
+    calib.add_argument("--apply-to", metavar="CONFIG",
+                       help="write a configuration file with the calibrated thresholds applied")
+
+    real = sub.add_parser(
+        "benchmark-real",
+        help="run the real-world benchmark on a public intrusion corpus")
+    real.add_argument("--corpus-cache", help="cache directory holding the fetched corpus")
+    real.add_argument("--corpus-root", help="use an already-extracted corpus directory")
+    real.add_argument("--window-seconds", type=float, default=20.0)
+    real.add_argument("--ngram-size", type=int, default=3)
+    real.add_argument("--calibration-fraction", type=float, default=0.25)
+    real.add_argument("--calibration-percentile", type=float, default=0.99)
+    real.add_argument("--seed", type=int, default=20261113)
+    real.add_argument("--config", "-c", help="analysis configuration JSON")
+    real.add_argument("--output", "-o", default="results/adfa-realworld.json")
+    real.add_argument("--format", "-f", choices=("json", "md"), default="json")
+    real.add_argument("--require-verified", action="store_true",
+                      help="refuse to run unless the cached archive matches its pinned digest")
+
     doctor = sub.add_parser("doctor", help="check environment, telemetry sources and configuration")
     doctor.add_argument("--input", help="optional JSONL file to validate")
     doctor.add_argument("--config", "-c")
@@ -253,6 +401,340 @@ def _load_analyze_events(args) -> tuple[list[dict], dict]:
         events = read_jsonl(args.input[0])
     events, window = filter_events(events, getattr(args, "since", None), getattr(args, "until", None))
     return events, {"sources": sources_block, "time_filter": window}
+
+
+def _cmd_ebpf(args) -> int:
+    if args.action == "check":
+        report = sensor_capabilities(args.bpftrace)
+        print(json.dumps(report, indent=2, sort_keys=True))
+        return 0 if report["available"] else 1
+    if args.action == "script":
+        if not args.output:
+            print("error: --output is required for 'script'", file=sys.stderr)
+            return 2
+        path = write_sensor_script(args.output)
+        print(json.dumps({"script": str(path), "format": "cabid-bpf/1"}, indent=2))
+        return 0
+    if not args.input:
+        print("error: an input file is required for 'parse'", file=sys.stderr)
+        return 2
+    source = Path(args.input)
+    try:
+        lines = source.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    events, errors = [], []
+    for item in parse_sensor_stream(lines, keep_errors=True):
+        if "error" in item:
+            errors.append(item)
+        else:
+            events.append(item)
+    from .normalize import normalize_event
+    normalized, invalid = [], 0
+    for event in events:
+        try:
+            normalized.append(normalize_event(event))
+        except EventError:
+            invalid += 1
+    summary = {
+        "format": "cabid-bpf-parse/1",
+        "input": str(source),
+        "lines": len(lines),
+        "events": len(normalized),
+        "parse_errors": len(errors),
+        "normalize_errors": invalid,
+        "error_examples": errors[:5],
+        "event_types": sorted({event["event_type"] for event in normalized}),
+    }
+    if args.output:
+        destination = Path(args.output)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        with destination.open("w", encoding="utf-8") as handle:
+            for event in normalized:
+                handle.write(json.dumps(event, sort_keys=True) + "\n")
+        summary["output"] = str(destination)
+    if args.report:
+        report_path = Path(args.report)
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        report_path.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n",
+                               encoding="utf-8")
+    print(json.dumps(summary, indent=2, sort_keys=True))
+    if errors and not args.keep_errors:
+        return 1
+    return 0
+
+
+def _cmd_alert(args) -> int:
+    reports = []
+    for raw in args.reports:
+        path = Path(raw)
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            print(f"error: {path}: {exc}", file=sys.stderr)
+            return 1
+        if not isinstance(payload, dict):
+            print(f"error: {path}: report must be a JSON object", file=sys.stderr)
+            return 1
+        reports.append(payload)
+    try:
+        state = load_alert_state(args.state) if args.state else None
+    except AlertError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+    common = dict(channel=args.channel, host=args.host, minimum=args.minimum,
+                  quiet_seconds=args.quiet_seconds, state=state,
+                  max_per_run=args.max_per_run, dashboard_url=args.dashboard_url,
+                  email_from=args.email_from, email_to=args.email_to,
+                  smtp_host=args.smtp_host, smtp_port=args.smtp_port,
+                  smtp_user=args.smtp_user, smtp_tls=not args.no_tls)
+    try:
+        if args.send:
+            receipts = []
+            for report in reports:
+                if "windows_scored" in report:
+                    receipts.append(send_from_stream_report(report, **common))
+                else:
+                    receipts.append(send_alerts([report], **common))
+                common["state"] = state
+            receipt = receipts[0] if len(receipts) == 1 else {
+                "format": "cabid-alert-receipt/1",
+                "aggregate": True,
+                "receipts": receipts,
+                "sent": sum(item.get("sent", 0) for item in receipts),
+                "channel": args.channel,
+            }
+        else:
+            # Dry run is the default so a first integration cannot page anyone. It
+            # previews the exact payload and still exercises suppression.
+            batched = []
+            for report in reports:
+                if "windows_scored" in report:
+                    batched.append(send_from_stream_report(
+                        report, dry_run=True, **common))
+                else:
+                    batched.append(send_alerts([report], dry_run=True, **common))
+                common["state"] = state
+            receipt = batched[0] if len(batched) == 1 else {
+                "format": "cabid-alert-receipt/1",
+                "aggregate": True,
+                "receipts": batched,
+                "sent": sum(item.get("sent", 0) for item in batched),
+                "channel": args.channel,
+                "dry_run": True,
+            }
+    except AlertError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+    if args.state and state is not None and args.send:
+        write_alert_state(state, args.state)
+    text = json.dumps(receipt, indent=2, sort_keys=True) + "\n"
+    if args.output:
+        destination = Path(args.output)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_text(text, encoding="utf-8")
+    sys.stdout.write(text)
+    return 0
+
+
+def _parse_host_pairs(items: list[str]) -> list[tuple[str, str]]:
+    pairs = []
+    for item in items:
+        for chunk in item.split(","):
+            chunk = chunk.strip()
+            if not chunk:
+                continue
+            host, separator, path = chunk.partition("=")
+            if not separator or not host or not path:
+                raise FleetError(f"expected HOST=REPORT.json, got {chunk!r}")
+            pairs.append((host.strip(), path.strip()))
+    return pairs
+
+
+def _cmd_fleet(args) -> int:
+    try:
+        if not args.compare:
+            pairs = _parse_host_pairs(args.pairs)
+            expected = None
+            if args.expected:
+                expected = [line.strip() for line in
+                            Path(args.expected).read_text(encoding="utf-8").splitlines()
+                            if line.strip()]
+            report = collect_fleet(pairs, expected_hosts=expected)
+        else:
+            baseline = _parse_host_pairs([args.baseline] if args.baseline else [])
+            current = _parse_host_pairs([args.current] if args.current else [])
+            if not baseline or not current:
+                raise FleetError("compare needs --baseline and --current host=report lists")
+            before = [_row_from(path, host) for host, path in baseline]
+            after = [_row_from(path, host) for host, path in current]
+            report = compare_fleets(before, after)
+    except (FleetError, OSError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    text = (render_fleet_markdown(report) if args.format == "md"
+            else json.dumps(report, indent=2, sort_keys=True) + "\n")
+    if args.output:
+        destination = Path(args.output)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_text(text, encoding="utf-8")
+    sys.stdout.write(text)
+    return 0
+
+
+def _row_from(path: str, host: str) -> dict:
+    from .fleet import _read_report, host_summary
+    return host_summary(_read_report(Path(path)), host=host, path=path)
+
+
+def _cmd_validate_baseline(args) -> int:
+    try:
+        profile = load_profile(args.profile)
+        sessions = [(Path(raw).name, read_jsonl(raw)) for raw in args.inputs]
+        report = validate_baseline(profile, sessions, minimum_sessions=args.min_sessions,
+                                   novelty_cutoff=args.novelty_cutoff)
+    except (NoveltyError, EventError, ValueError, OSError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    if args.output:
+        destination = Path(args.output)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n",
+                               encoding="utf-8")
+    print(json.dumps(report, indent=2, sort_keys=True))
+    return 0 if report["verdict"] != "INVALID" else 1
+
+
+def _cmd_drift_report(args) -> int:
+    try:
+        profile = load_profile(args.profile)
+        sessions = [(Path(raw).name, read_jsonl(raw)) for raw in args.inputs]
+        report = drift_report(profile, sessions, threshold=args.threshold,
+                              novelty_cutoff=args.novelty_cutoff)
+    except (NoveltyError, EventError, ValueError, OSError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    if args.output:
+        destination = Path(args.output)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n",
+                               encoding="utf-8")
+    print(json.dumps(report, indent=2, sort_keys=True))
+    return 0
+
+
+def _cmd_calibrate(args) -> int:
+    config = load_config(args.config)
+    if args.compare:
+        try:
+            saved = load_calibration(args.compare)
+        except CalibrationError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        print(json.dumps({"comparison": compare_thresholds(config, saved)},
+                         indent=2, sort_keys=True))
+        return 0
+    sessions = []
+    for raw in args.inputs:
+        path = Path(raw)
+        try:
+            sessions.append((path.name, read_jsonl(path)))
+        except EventError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+    try:
+        result = calibrate(sessions, reference_percentile=args.reference_percentile,
+                           high_percentile=args.high_percentile,
+                           mad_multiplier=args.mad_multiplier,
+                           config=config, minimum_sessions=args.min_sessions)
+        write_calibration(result, args.output)
+        if args.apply_to:
+            applied = apply_config(result, json.loads(json.dumps(config)))
+            applied.update({"$schema": "https://github.com/sayan9168/CABID/blob/main/"
+                                        "docs/configuration.md",
+                            "format": "cabid-config/1"})
+            destination = Path(args.apply_to)
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_text(json.dumps(applied, indent=2, sort_keys=True) + "\n",
+                                   encoding="utf-8")
+    except CalibrationError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    print(json.dumps(result, indent=2, sort_keys=True))
+    return 0
+
+
+def _cmd_corpus(args) -> int:
+    if args.action == "list":
+        print(json.dumps({"format": "cabid-corpus/1", "corpora": corpus_catalogue()},
+                         indent=2, sort_keys=True))
+        return 0
+    if not args.name:
+        print("error: a corpus name is required for fetch/verify", file=sys.stderr)
+        return 2
+    try:
+        if args.action == "fetch":
+            result = corpus_fetch(args.name, args.cache, refresh=args.refresh,
+                                  offline=args.offline)
+        else:
+            from .corpus import verify as corpus_verify
+            result = corpus_verify(args.name, args.cache)
+    except CorpusError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    print(json.dumps(result, indent=2, sort_keys=True))
+    return 0
+
+
+def _cmd_benchmark_real(args) -> int:
+    from .corpus import load_manifest, verify as corpus_verify
+
+    root = args.corpus_root
+    cache = None
+    if root is None:
+        try:
+            if args.require_verified:
+                checked = corpus_verify("adfa-ld", args.corpus_cache)
+                if not checked["verified"]:
+                    print(f"error: corpus checksum mismatch: {checked['actual_sha256']}",
+                          file=sys.stderr)
+                    return 1
+            manifest = load_manifest("adfa-ld", args.corpus_cache)
+        except CorpusError as exc:
+            print(f"error: {exc}\nhint: run 'cabid corpus fetch adfa-ld' first",
+                  file=sys.stderr)
+            return 1
+        root = manifest.get("path")
+        cache = {"archive_sha256": manifest.get("archive_sha256"),
+                 "source_url": manifest.get("source_url"),
+                 "source_commit": manifest.get("source_commit")}
+    try:
+        report = run_adfa_benchmark(
+            root,
+            window_seconds=args.window_seconds,
+            ngram_size=args.ngram_size,
+            calibration_fraction=args.calibration_fraction,
+            calibration_percentile=args.calibration_percentile,
+            seed=args.seed,
+            config=load_config(args.config),
+        )
+    except (ValueError, ConfigError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    if cache is not None:
+        report["corpus"].update({k: v for k, v in cache.items() if v})
+    destination = Path(args.output)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    if args.format == "md":
+        markdown = Path(args.output).with_suffix(".md")
+        markdown.parent.mkdir(parents=True, exist_ok=True)
+        markdown.write_text(_realworld_markdown(report), encoding="utf-8")
+    print(json.dumps(report, indent=2, sort_keys=True))
+    return 0
 
 
 def _cmd_analyze(args) -> int:
@@ -687,6 +1169,38 @@ def main(argv: list[str] | None = None) -> int:
                 report_path.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8")
             print(json.dumps(summary, indent=2, sort_keys=True))
             return 0
+        if args.command == "ebpf":
+            return _cmd_ebpf(args)
+        if args.command == "alert":
+            return _cmd_alert(args)
+        if args.command == "fleet":
+            return _cmd_fleet(args)
+        if args.command == "analyze-stream":
+            try:
+                report = stream_file(args.input, window_seconds=args.window_seconds,
+                                     config=load_config(args.config),
+                                     profile=load_profile(args.baseline) if args.baseline else None,
+                                     sample_limit=args.sample_limit)
+            except (StreamError, ValueError, ConfigError) as exc:
+                print(f"error: {exc}", file=sys.stderr)
+                return 1
+            if args.output:
+                destination = Path(args.output)
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                destination.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n",
+                                       encoding="utf-8")
+            print(json.dumps(report, indent=2, sort_keys=True))
+            return 0
+        if args.command == "validate-baseline":
+            return _cmd_validate_baseline(args)
+        if args.command == "drift-report":
+            return _cmd_drift_report(args)
+        if args.command == "calibrate":
+            return _cmd_calibrate(args)
+        if args.command == "corpus":
+            return _cmd_corpus(args)
+        if args.command == "benchmark-real":
+            return _cmd_benchmark_real(args)
         if args.command == "benchmark":
             report = run_benchmark(args.output, args.seed, args.per_class,
                                    config=load_config(args.config),
@@ -737,6 +1251,41 @@ def main(argv: list[str] | None = None) -> int:
             FilterError, RuleError, SealError, SigmaError, ResponseError, ExecutionError,
             json.JSONDecodeError, ValueError) as exc:
         return _fail(str(exc))
+
+
+def _realworld_markdown(report: dict) -> str:
+    corpus = report.get("corpus", {})
+    lines = ["# CABID real-world benchmark (ADFA-LD)", ""]
+    lines.append("> Real public corpus, but a 2013 syscall-trace dataset with no timestamps,")
+    lines.append("> pids or paths. These numbers measure pipeline behaviour on that data;")
+    lines.append("> they are not evidence of real-world intrusion detection quality.")
+    lines.append("")
+    counts = corpus.get("trace_counts", {})
+    lines.append(f"Corpus traces: {counts.get('training', '?')} training, "
+                 f"{counts.get('validation', '?')} validation, {counts.get('attack', '?')} attack.")
+    lines.append("")
+    lines += ["| Model | Precision | Recall | F1 | FPR | Samples |", "| --- | --- | --- | --- | --- | --- |"]
+    for name, values in sorted(report.get("models", {}).items()):
+        lines.append(f"| {name} | {values['precision']:.3f} | {values['recall']:.3f} | "
+                     f"{values['f1']:.3f} | {values['false_positive_rate']:.3f} | "
+                     f"{values['sample_count']} |")
+    recall_ci = report.get("models", {}).get("cabid_with_baseline", {}).get("recall_ci95")
+    if recall_ci:
+        lines += ["", f"95% Wilson interval on CABID recall: {recall_ci[0]:.3f} to {recall_ci[1]:.3f}."]
+    separation = report.get("score_separation", {})
+    if separation:
+        lines += ["", f"Threshold-free separation (AUC): CABID anomaly score "
+                      f"{separation.get('cabid_anomaly_score_auc')}, "
+                      f"syscall n-gram {separation.get('syscall_ngram_auc')}."]
+    coverage = report.get("coverage", {})
+    if coverage:
+        lines += ["", f"Traces the event mapping could not represent: "
+                      f"{coverage.get('unmappable_attack_traces')} attack, "
+                      f"{coverage.get('unmappable_benign_traces')} benign. "
+                      "These are counted as undetected."]
+    lines += ["", "## Limitations", ""]
+    lines += [f"- {item}" for item in report.get("limitations", [])]
+    return "\n".join(lines) + "\n"
 
 
 def _benchmark_markdown(report: dict) -> str:

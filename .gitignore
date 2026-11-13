@@ -8,7 +8,10 @@ dist/
 build/
 .coverage
 htmlcov/
-results/
+results/*
+# Published benchmark output is part of the reproducibility record.
+!results/adfa-realworld.json
+!results/perf-*.json
 *.sarif.tmp
 *.sqlite3
 *.sqlite3-journal
