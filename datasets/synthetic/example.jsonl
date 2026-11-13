@@ -1,0 +1,6 @@
+{"timestamp":1760000000,"event_type":"process_start","process_id":100,"parent_process_id":1,"process_name":"systemd","source":"synthetic"}
+{"timestamp":1760000005,"event_type":"process_exec","process_id":100,"parent_process_id":1,"process_name":"systemd","executable":"/usr/bin/example","source":"synthetic"}
+{"timestamp":1760000010,"event_type":"file_write","process_id":100,"parent_process_id":1,"target":"/tmp/example.txt","source":"synthetic"}
+{"timestamp":1760000015,"event_type":"network_connect","process_id":100,"parent_process_id":1,"target":"example.invalid:443","source":"synthetic"}
+{"timestamp":1760000020,"event_type":"process_exit","process_id":100,"parent_process_id":1,"source":"synthetic"}
+{"timestamp":1760000025,"event_type":"heartbeat","process_id":1,"parent_process_id":0,"source":"synthetic"}
