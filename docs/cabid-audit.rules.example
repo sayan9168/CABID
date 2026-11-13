@@ -1,0 +1,12 @@
+# Example Linux audit rules for CABID research collection.
+# Review with your administrator before enabling: audit logs can grow quickly.
+# These rules do not cover 32-bit compatibility syscalls.
+# Supported parser architectures: x86_64 and aarch64 (audit arch c000003e/c00000b7).
+
+-a always,exit -F arch=b64 -S execve,execveat -F success=1 -k cabid_exec
+-a always,exit -F arch=b64 -S fork,vfork,clone -F success=1 -k cabid_process_start
+-a always,exit -F arch=b64 -S connect -F success=1 -k cabid_network
+-a always,exit -F arch=b64 -S open,openat,creat -F success=1 -k cabid_file_intent
+
+# OPTIONAL and potentially high-volume: enable only after estimating event volume.
+# -a always,exit -F arch=b64 -S exit,exit_group -F success=1 -k cabid_process_exit

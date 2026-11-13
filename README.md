@@ -35,17 +35,17 @@ network, or exit events. It is not an EDR sensor.
 
 ## Import Linux auditd records
 
-On a host where auditd is configured, export records:
+Review docs/cabid-audit.rules.example with an administrator before enabling
+audit collection. Audit rules can increase log volume and capture sensitive
+process/path metadata. They are not installed automatically.
 
     sudo ausearch --start today --format raw > /tmp/audit.raw
-
-Then parse:
-
     cabid import-audit /tmp/audit.raw --output /tmp/audit-events.jsonl --report /tmp/import-report.json
     cabid analyze /tmp/audit-events.jsonl
 
-The importer recognizes only a limited syscall subset. It does not configure
-audit rules or synthesize heartbeat events. See docs/auditd-ingestion.md.
+The importer recognizes only a limited syscall subset and does not synthesize
+heartbeat events. A file_write event means a write-capable open intent, not
+proof that bytes were written. See docs/auditd-ingestion.md.
 
 ## Run synthetic benchmark
 
