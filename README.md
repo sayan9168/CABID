@@ -4,7 +4,7 @@
 
 CABID combines temporal activity, conservative process ancestry checks, and telemetry-class completeness over normalized event streams. It reports insufficient evidence when required event classes are absent.
 
-> Research status: alpha prototype (v0.4.0). Novelty and real-world detection performance are not established. Scores are heuristics, not probabilities.
+> Research status: alpha prototype (v0.5.0). Novelty and real-world detection performance are not established. Scores are heuristics, not probabilities.
 
 ## Features
 
@@ -17,9 +17,14 @@ CABID combines temporal activity, conservative process ancestry checks, and tele
   reported as context, never scored as malicious on their own
 - Telemetry completeness gate — missing classes produce `INSUFFICIENT_EVIDENCE`,
   never "safe"
-- Declarative detection policy: sensitive paths/ports, allow-lists, suppressions
+- Declarative detection policy: sensitive paths/ports, allow-lists, global and
+  per-process suppressions
 - Versioned, validated configuration with a reproducible `config_digest`
 - Windowed analysis (`--window`) and streaming `watch` mode
+- Per-process entity rollup that ranks which process to inspect first
+- Multi-source merge with provenance, duplicate counts, and overlap warnings
+- Inclusive time filtering (`--since`/`--until`, ISO-8601 or epoch)
+- Local SQLite run history and run-to-run comparison (`cabid history`)
 - Reports in JSON, Markdown, CSV, SARIF 2.1.0, and self-contained HTML
 - Local read-only dashboard (`cabid dashboard`) with no external assets
 - Best-effort unprivileged Linux /proc polling
@@ -58,6 +63,21 @@ Loopback-only by default; see docs/dashboard.md before changing `--host`.
 
 Every report embeds a `config_digest` and the ordered reasons behind the verdict.
 See docs/configuration.md, docs/baseline.md, and docs/policy.md.
+
+## Investigate a window
+
+    # merge artifacts, trim to the incident window, record the run
+    cabid analyze procfs.jsonl audit.jsonl \
+        --since 2026-11-13T00:00:00Z --until 2026-11-13T06:00:00Z \
+        --save-history --label "incident-42" --format md -o incident-42.md
+
+    # later: is this host better or worse than that run?
+    cabid analyze procfs.jsonl --compare-history 4 --format md -o compare.md
+    cabid history --compare 4 9
+
+The report ranks processes so triage starts at the right pid, and states the
+source files, duplicate counts, and any time-range trim. See docs/entities.md,
+docs/multi-source.md, and docs/history.md.
 
 ## Stage it in CI
 
@@ -111,6 +131,9 @@ file_write, network_connect, process_exit, heartbeat. See docs/event-schema.md.
 | docs/methodology.md | research question, hypothesis, experimental design |
 | docs/configuration.md | configuration schema, validation, reproducibility |
 | docs/baseline.md | benign profiles and novelty scoring |
+| docs/entities.md | per-process rollup and its triage semantics |
+| docs/multi-source.md | merging artifacts and time filtering |
+| docs/history.md | local run history and comparisons |
 | docs/policy.md | operator policy: sensitive targets, allow-lists, suppressions |
 | docs/reports.md | JSON/Markdown/CSV/SARIF/HTML reports and exit codes |
 | docs/dashboard.md | local dashboard and its HTTP API |

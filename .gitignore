@@ -10,3 +10,6 @@ build/
 htmlcov/
 results/
 *.sarif.tmp
+*.sqlite3
+*.sqlite3-journal
+cabid-history.sqlite3

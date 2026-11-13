@@ -22,11 +22,13 @@ from urllib.parse import parse_qs, urlparse
 
 from . import __version__
 from .baseline import build_profile
+from .filters import FilterError, filter_events
 from .benchmark import evaluate, generate_cases
 from .config import ConfigError, load_config
 from .detector import analyze, analyze_windows
 from .ingest import normalize_many, read_jsonl
 from .normalize import EventError
+from .aggregate import IngestError, ingest_sources
 from .policy import PolicyError, evaluate_policy, load_policy
 
 MAX_BODY_BYTES = 8 * 1024 * 1024
@@ -52,12 +54,17 @@ def list_datasets(directory: Path = DATASET_DIR) -> list[dict]:
     return items
 
 
-def load_dataset(name: str, directory: Path = DATASET_DIR) -> list[dict]:
+def _dataset_path(name: str, directory: Path = DATASET_DIR) -> Path:
     if not _SAFE_NAME.match(name or ""):
         raise ApiError(400, "invalid dataset name")
     path = (directory / name).resolve()
     if path.parent != directory.resolve() or not path.is_file():
         raise ApiError(404, f"dataset not found: {name}")
+    return path
+
+
+def load_dataset(name: str, directory: Path = DATASET_DIR) -> list[dict]:
+    path = _dataset_path(name, directory)
     try:
         return read_jsonl(path)
     except EventError as exc:
@@ -87,7 +94,23 @@ def parse_events(payload: object) -> list[dict]:
 
 
 def analyze_payload(payload: dict) -> dict:
-    events = parse_events(payload.get("events"))
+    if "datasets" in payload:
+        names = payload.get("datasets")
+        if not isinstance(names, list) or not names:
+            raise ApiError(422, "datasets must be a non-empty list of dataset names")
+        try:
+            merged = ingest_sources([_dataset_path(name) for name in names[:16]])
+        except (IngestError, ApiError) as exc:
+            raise ApiError(422 if isinstance(exc, IngestError) else exc.status, str(exc))
+        events = merged.pop("events")
+        sources = merged
+    else:
+        events = parse_events(payload.get("events"))
+        sources = None
+    try:
+        events, time_window = filter_events(events, payload.get("since"), payload.get("until"))
+    except FilterError as exc:
+        raise ApiError(422, str(exc)) from exc
     window = payload.get("window_seconds")
     if window is not None:
         try:
@@ -98,9 +121,13 @@ def analyze_payload(payload: dict) -> dict:
             raise ApiError(422, "window_seconds must be positive")
     config = payload.get("config") or {}
     try:
-        report = analyze(events, config)
+        report = analyze(events, config, policy=payload.get("policy") if isinstance(
+            payload.get("policy"), dict) else None)
     except (ConfigError, ValueError) as exc:
         raise ApiError(422, str(exc)) from exc
+    if sources is not None:
+        report["sources"] = sources
+    report["time_filter"] = time_window
     policy_payload = payload.get("policy")
     if isinstance(policy_payload, dict):
         report["policy"] = evaluate_policy(events, policy_payload, report.get("reasons"))
@@ -108,7 +135,9 @@ def analyze_payload(payload: dict) -> dict:
         # The UI shows default-policy findings unless policy evaluation is disabled.
         report["policy"] = evaluate_policy(events, None, report.get("reasons"))
     if window is not None:
-        report["windowed"] = analyze_windows(events, window, config)
+        report["windowed"] = analyze_windows(events, window, config, None,
+                                             policy=payload.get("policy") if isinstance(
+                                                 payload.get("policy"), dict) else None)
     return report
 
 

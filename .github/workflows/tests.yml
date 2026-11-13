@@ -52,6 +52,38 @@ jobs:
           cabid doctor --format json > /tmp/doctor.json
           python -c "import json;assert json.load(open('/tmp/doctor.json'))['ready'] is True"
           cabid analyze datasets/synthetic/example.jsonl --fail-on HIGH_RISK --quiet -o /tmp/r.json
+      - name: Multi-source, time filter and history
+        run: |
+          cabid analyze datasets/synthetic/example.jsonl datasets/synthetic/suspicious-example.jsonl \
+            --since 2025-10-09T00:00:00Z --format json -o /tmp/merged.json
+          python - <<'PY'
+          import json
+          report = json.load(open('/tmp/merged.json'))
+          assert report['sources']['source_count'] == 2
+          assert report['time_filter']['active'] is True
+          assert report['entities']['entity_count'] >= 1
+          PY
+          cabid analyze datasets/synthetic/example.jsonl --history-db /tmp/history.sqlite3 \
+            --save-history --label calm -o /tmp/calm.json --quiet
+          cabid analyze datasets/synthetic/suspicious-example.jsonl --history-db /tmp/history.sqlite3 \
+            --save-history --label noisy --compare-history 1 -o /tmp/noisy.json --quiet
+          cabid history --db /tmp/history.sqlite3 --compare 1 2 --format json > /tmp/hcmp.json
+          python - <<'PY'
+          import json
+          comparison = json.load(open('/tmp/hcmp.json'))['comparison']
+          assert comparison['status_changed'] is True
+          assert comparison['score_delta'] > 0
+          report = json.load(open('/tmp/noisy.json'))
+          assert report['history_comparison']['new_reason_codes']
+          assert report['entities']['flagged_entity_count'] >= 1
+          PY
+          python - <<'PY'
+          # The history database must never contain raw event content.
+          blob = open('/tmp/history.sqlite3', 'rb').read()
+          for needle in (b'/etc/shadow', b'/tmp/.build/worker', b'10.0.0.9'):
+              assert needle not in blob, f'history leaked {needle!r}'
+          print('history content check ok')
+          PY
       - name: Dashboard smoke test
         run: |
           python - <<'PY'

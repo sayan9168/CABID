@@ -128,3 +128,21 @@ def test_bundled_suspicious_fixture_drives_the_ui(live_server):
     assert report["status"] in {"SUSPICIOUS", "HIGH_RISK"}
     assert report["policy"]["finding_count"] >= 1
     assert report["windowed"]["summary"]["window_count"] > 1
+
+
+def test_multi_dataset_analysis_with_time_filter(live_server):
+    status, raw = call(live_server + "/api/analyze", "POST",
+                       {"datasets": ["example.jsonl", "suspicious-example.jsonl"],
+                        "since": "2025-10-09T00:00:00Z", "until": "2025-10-20T00:00:00Z"})
+    assert status == 200
+    report = json.loads(raw)
+    assert report["sources"]["source_count"] == 2
+    assert report["time_filter"]["active"] is True
+    assert report["entities"]["entity_count"] >= 1
+
+
+def test_bad_time_range_and_dataset_list_are_422(live_server):
+    assert call(live_server + "/api/analyze", "POST",
+                {"events": [], "since": "2030-01-01", "until": "2020-01-01"})[0] == 422
+    assert call(live_server + "/api/analyze", "POST", {"datasets": []})[0] == 422
+    assert call(live_server + "/api/analyze", "POST", {"datasets": ["../pyproject.toml"]})[0] in {400, 404, 422}

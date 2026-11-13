@@ -98,3 +98,29 @@ def test_nested_window_block_renders_in_every_format():
     document = json.loads(render_sarif(report))
     assert document["runs"][0]["results"]
     assert "Time windows" in render_html(report)
+
+
+def test_entities_sources_filter_and_comparison_render():
+    events = read_jsonl("datasets/synthetic/suspicious-example.jsonl")
+    report = analyze(events)
+    report["time_filter"] = {"active": True, "events_in": 80, "events_out": 72, "events_removed": 8,
+                             "since_iso": "2026-11-13T00:00:00+00:00", "until_iso": None}
+    report["sources"] = {"source_count": 1, "events_total": 72, "duplicate_events": 0,
+                         "overlapping_sources": [],
+                         "sources": [{"source": "a.jsonl", "events": 72,
+                                      "first_timestamp": 1.0, "last_timestamp": 2.0}]}
+    report["history_comparison"] = {"baseline_run": {"id": 3, "label": "old", "created_at": "x"},
+                                    "score_delta": 0.4, "status_changed": True,
+                                    "new_reason_codes": ["self_parent_ancestry"],
+                                    "cleared_reason_codes": []}
+    markdown = render_markdown(report)
+    assert "## Process rollup" in markdown
+    assert "## Sources" in markdown
+    assert "## Time filter" in markdown
+    assert "## History comparison" in markdown
+    assert "+0.400" in markdown
+    html = render_html(report)
+    assert "Process rollup" in html and "History comparison" in html
+    rows = list(csv.reader(io.StringIO(render_csv(report))))
+    assert any(row[0] == "entity" for row in rows)
+    assert any(row[0] == "source" for row in rows)
