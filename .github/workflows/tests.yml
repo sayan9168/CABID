@@ -21,5 +21,56 @@ jobs:
       - run: python -m compileall -q cabid tests
       - run: pytest
       - run: cabid --version
-      - run: cabid benchmark --output /tmp/cabid-benchmark.json --seed 42 --per-class 5
-      - run: python -c "import json; d=json.load(open('/tmp/cabid-benchmark.json')); assert d['models']['cabid_telemetry_aware']['sample_count'] == 15"
+      - name: Synthetic benchmark
+        run: cabid benchmark --output /tmp/cabid-benchmark.json --seed 42 --per-class 5
+      - name: Assert benchmark shape
+        run: |
+          python - <<'PY'
+          import json
+          report = json.load(open('/tmp/cabid-benchmark.json'))
+          assert report['models']['cabid_with_baseline']['sample_count'] == 15
+          assert report['models']['cabid_core']['sample_count'] == 15
+          assert report['models']['temporal_only']['sample_count'] == 15
+          assert set(report['scenario_metrics']) == {
+              'benign_regular', 'synthetic_behavior_anomaly', 'telemetry_loss'}
+          PY
+      - name: Report formats
+        run: |
+          cabid init-config -o /tmp/cabid-config.json
+          cabid build-baseline datasets/synthetic/example.jsonl datasets/synthetic/example.jsonl \
+            datasets/synthetic/example.jsonl -o /tmp/baseline.json --min-sessions 2
+          for fmt in json md csv sarif html; do
+            cabid analyze datasets/synthetic/example.jsonl -c /tmp/cabid-config.json \
+              -b /tmp/baseline.json --window 20 --format "$fmt" -o "/tmp/report.$fmt" --quiet
+            test -s "/tmp/report.$fmt"
+          done
+      - name: SARIF is valid JSON with a tool driver
+        run: |
+          python -c "import json;d=json.load(open('/tmp/report.sarif'));assert d['runs'][0]['tool']['driver']['name']=='CABID'"
+      - name: Doctor and exit codes
+        run: |
+          cabid doctor --format json > /tmp/doctor.json
+          python -c "import json;assert json.load(open('/tmp/doctor.json'))['ready'] is True"
+          cabid analyze datasets/synthetic/example.jsonl --fail-on HIGH_RISK --quiet -o /tmp/r.json
+      - name: Dashboard smoke test
+        run: |
+          python - <<'PY'
+          import json, threading, urllib.request
+          from cabid.server import serve
+          httpd = serve('127.0.0.1', 0)
+          threading.Thread(target=httpd.serve_forever, daemon=True).start()
+          host, port = httpd.server_address[:2]
+          base = f'http://{host}:{port}'
+          health = json.load(urllib.request.urlopen(base + '/api/health'))
+          assert health['status'] == 'ok'
+          body = json.dumps({'events': [{'timestamp': 1, 'event_type': 'heartbeat', 'process_id': 1}]}).encode()
+          request = urllib.request.Request(base + '/api/analyze', data=body,
+                                          headers={'Content-Type': 'application/json'})
+          report = json.load(urllib.request.urlopen(request))
+          assert report['status'] == 'INSUFFICIENT_EVIDENCE'
+          page = urllib.request.urlopen(base + '/').read()
+          assert b'CABID' in page
+          httpd.shutdown()
+          httpd.server_close()
+          print('dashboard ok')
+          PY

@@ -33,3 +33,79 @@ def test_self_parent_is_scored():
     report = analyze(events)
     assert report["causal"]["self_parent_events"] == 1
     assert report["causal"]["causal_score"] > 0
+
+
+def test_sequence_contradiction_raises_score_and_is_explained():
+    events = complete_events()
+    baseline = analyze(events)
+    events.append({"timestamp": events[-1]["timestamp"] + 1, "timestamp_iso": "x",
+                   "event_type": "file_write", "process_id": 14,
+                   "parent_process_id": 1, "process_name": "unknown", "executable": "",
+                   "target": "/tmp/after-exit", "source": "test"})
+    report = analyze(events)
+    assert report["sequence"]["activity_after_exit"] >= 1
+    assert report["anomaly_score"] > baseline["anomaly_score"]
+    assert any(reason["code"] == "lifecycle_contradiction" for reason in report["reasons"])
+
+
+def test_contributions_reconstruct_the_anomaly_score():
+    report = analyze(complete_events())
+    contribution = report["contribution"]
+    # contribution is the share of the weighted sum, so it must be a valid distribution
+    assert all(0.0 <= value <= 1.0 for value in contribution.values())
+    assert abs(sum(contribution.values()) - report["anomaly_score"]) < 1e-6
+
+
+def test_reasons_are_sorted_by_weighted_impact():
+    events = complete_events()
+    events[0]["parent_process_id"] = events[0]["process_id"]
+    report = analyze(events)
+    impacts = [reason["weight"] * reason["component_value"] for reason in report["reasons"]]
+    assert impacts == sorted(impacts, reverse=True)
+
+
+def test_config_changes_are_reflected_and_digest_changes():
+    default = analyze(complete_events())
+    tuned = analyze(complete_events(), {"weights": {"temporal": 1.0, "causal": 0.0, "sequence": 0.0,
+                                                    "telemetry_gap": 0.0}})
+    assert default["config_digest"] != tuned["config_digest"]
+    assert tuned["components"]["causal"] == 0.0 or tuned["normalized_weights"]["causal"] == 0.0
+
+
+def test_novelty_joins_the_score_only_with_a_baseline():
+    from cabid.baseline import build_profile
+
+    sessions = [(f"s{i}", complete_events()) for i in range(3)]
+    profile = build_profile(sessions)
+    without = analyze(complete_events())
+    with_profile = analyze(complete_events(), profile=profile)
+    assert without["baseline_used"] is False
+    assert with_profile["baseline_used"] is True
+    assert with_profile["normalized_weights"]["novelty"] > 0
+    assert without["normalized_weights"]["novelty"] == 0.0
+
+
+def test_empty_stream_does_not_crash():
+    report = analyze([])
+    assert report["status"] == "INSUFFICIENT_EVIDENCE"
+    assert report["event_count"] == 0
+
+
+def test_windowed_analysis_shape():
+    from cabid.detector import analyze_windows
+
+    events = complete_events()
+    result = analyze_windows(events, 10)
+    assert result["summary"]["window_count"] >= 1
+    assert sum(result["summary"]["status_counts"].values()) == result["summary"]["window_count"]
+    assert "aggregate" in result
+    assert result["aggregate"]["event_count"] == len(events)
+
+
+def test_window_length_must_be_positive():
+    import pytest
+
+    from cabid.detector import analyze_windows
+
+    with pytest.raises(ValueError):
+        analyze_windows(complete_events(), 0)
