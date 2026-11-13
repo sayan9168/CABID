@@ -7,12 +7,19 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.10', '3.11', '3.12', '3.13']
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
+          python-version: ${{ matrix.python-version }}
       - run: python -m pip install --upgrade pip
       - run: python -m pip install -e '.[test]'
+      - run: python -m compileall -q cabid tests
       - run: pytest
       - run: cabid --version
+      - run: cabid benchmark --output /tmp/cabid-benchmark.json --seed 42 --per-class 5
+      - run: python -c "import json; d=json.load(open('/tmp/cabid-benchmark.json')); assert d['models']['cabid_telemetry_aware']['sample_count'] == 15"

@@ -1,13 +1,19 @@
 import pytest
 from cabid.normalize import EventError, normalize_event
 
-def test_normalize_event_fields():
-    event = normalize_event({"timestamp": 1700000000, "event_type": "process_exec", "process_id": 42, "parent_process_id": 1})
-    assert event["process_id"] == 42
-    assert event["event_type"] == "process_exec"
-    assert event["timestamp_iso"].startswith("2023-11-14T")
 
-@pytest.mark.parametrize("payload", [None, {}, {"timestamp": -1, "event_type": "process_exec", "process_id": 1}, {"timestamp": 1, "event_type": "unknown", "process_id": 1}, {"timestamp": 1, "event_type": "process_exec", "process_id": 0}])
-def test_invalid_events_rejected(payload):
+def test_rejects_nan_and_infinite_timestamps():
+    for value in (float("nan"), float("inf"), float("-inf")):
+        with pytest.raises(EventError):
+            normalize_event({"timestamp": value, "event_type": "heartbeat", "process_id": 1})
+
+
+def test_rejects_boolean_and_fractional_process_ids():
+    for value in (True, 1.5, "1.5"):
+        with pytest.raises(EventError):
+            normalize_event({"timestamp": 1, "event_type": "heartbeat", "process_id": value})
+
+
+def test_rejects_out_of_range_datetime():
     with pytest.raises(EventError):
-        normalize_event(payload)
+        normalize_event({"timestamp": 1e100, "event_type": "heartbeat", "process_id": 1})

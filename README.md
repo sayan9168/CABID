@@ -2,76 +2,72 @@
 
 **Context-Aware Behavioral Integrity Detection** — a lightweight, explainable Linux security research prototype.
 
-CABID combines temporal activity, process-parent consistency, and telemetry-class completeness over normalized event streams. Its goal is to avoid treating an incomplete event stream as proof of benign activity.
+CABID combines temporal activity, conservative process ancestry checks, and telemetry-class completeness over normalized event streams. It reports insufficient evidence when required event classes are absent.
 
-> Research status: early prototype (v0.2.0). Novelty and detection performance are not established. Scores are heuristics, not probabilities. No real-world benchmark claims are made.
+> Research status: alpha prototype (v0.3.0). Novelty and real-world detection performance are not established. Scores are heuristics, not probabilities.
 
 ## Features
 
 - Dependency-free Python core (Python 3.10+)
-- Strict JSONL event validation and deterministic normalization
-- Temporal event-rate and burstiness features
-- Window-local process ancestry consistency checks
-- Missing-event-class reporting and insufficient-evidence status
-- Explainable JSON output and CLI
-- Unprivileged Linux `/proc` polling collector for process observations
-- Unit tests and GitHub Actions CI
+- Strict JSONL event validation
+- Temporal rate and burstiness features
+- Conservative process ancestry checks (unseen parents are context, not automatic alerts)
+- Telemetry completeness gate
+- Best-effort unprivileged Linux /proc polling
+- Limited Linux auditd raw-log importer for x86_64 and aarch64
+- Deterministic synthetic benchmark with temporal-only baseline comparison
+- JSON reports, CLI, automated tests and GitHub Actions
 
 ## Install
 
-```bash
-python -m venv .venv
-source .venv/bin/activate
-python -m pip install -e '.[test]'
-```
+    python -m venv .venv
+    source .venv/bin/activate
+    python -m pip install -e '.[test]'
+    pytest
 
-## Collect Linux process observations
+## Collect visible process snapshots
 
-On Linux, collect visible process snapshots without root:
+    cabid collect-proc --output /tmp/cabid-events.jsonl --interval 2 --duration 30
+    cabid analyze /tmp/cabid-events.jsonl
 
-```bash
-cabid collect-proc --output /tmp/cabid-events.jsonl --interval 2 --duration 30
-```
+The procfs collector can miss short-lived processes and does not collect file,
+network, or exit events. It is not an EDR sensor.
 
-The collector reports first-observed processes and later executable/cmdline changes. It also writes a heartbeat for each poll. This is best-effort polling, not kernel event tracing; short-lived processes may be missed and process start/exec times are not exact. It does not capture file writes, network connections, or syscalls. See [Linux collector notes](docs/linux-collector.md).
+## Import Linux auditd records
 
-## Analyze events
+On a host where auditd is configured, export records:
 
-```bash
-cabid analyze /tmp/cabid-events.jsonl
-cabid analyze datasets/synthetic/example.jsonl
-cabid analyze datasets/synthetic/example.jsonl --output report.json
-```
+    sudo ausearch --start today --format raw > /tmp/audit.raw
 
-The report contains status, a heuristic anomaly score, component scores, missing telemetry classes, and explanations. Status values are `NO_ANOMALY_DETECTED`, `SUSPICIOUS`, `HIGH_RISK`, and `INSUFFICIENT_EVIDENCE`. `NO_ANOMALY_DETECTED` does not mean a system is safe.
+Then parse:
 
-## Test
+    cabid import-audit /tmp/audit.raw --output /tmp/audit-events.jsonl --report /tmp/import-report.json
+    cabid analyze /tmp/audit-events.jsonl
 
-```bash
-python -m pip install -e '.[test]'
-pytest
-```
+The importer recognizes only a limited syscall subset. It does not configure
+audit rules or synthesize heartbeat events. See docs/auditd-ingestion.md.
+
+## Run synthetic benchmark
+
+    cabid benchmark --output results/synthetic-benchmark.json --seed 20261113 --per-class 50
+
+This compares a temporal-only baseline with the telemetry-aware CABID status
+gate on generated benign, synthetic behavior-anomaly, and telemetry-loss cases.
+Synthetic metrics are software diagnostics, not real-world detection claims.
+See docs/benchmark.md.
 
 ## Event input
 
-One JSON object per line. Required: `timestamp` (Unix seconds), `event_type`,
-and positive `process_id`. Supported event types: `process_start`,
-`process_exec`, `file_write`, `network_connect`, `process_exit`, and
-`heartbeat`. See [event schema](docs/event-schema.md).
+One JSON object per line. Required fields: timestamp (Unix seconds), event_type,
+and positive process_id. Supported event types: process_start, process_exec,
+file_write, network_connect, process_exit, heartbeat. See docs/event-schema.md.
 
-## Research plan
+## Research and limitations
 
-See [methodology](docs/methodology.md) for a falsifiable hypothesis, baselines,
-split strategy, and metrics. Default weights and thresholds are initial heuristics
-and must be tuned only on training/validation data, then evaluated on held-out
-scenarios.
-
-## Safety and limitations
-
-See [limitations](docs/limitations.md). Use only on systems and logs you own or
-are authorized to analyze. CABID is a research aid, not an endpoint protection
-product.
+See docs/methodology.md, docs/limitations.md, docs/telemetry-policy.md,
+docs/auditd-ingestion.md, and docs/benchmark.md. Use only on systems and logs
+you own or are authorized to analyze.
 
 ## License
 
-MIT. See [LICENSE](LICENSE).
+MIT. See LICENSE.

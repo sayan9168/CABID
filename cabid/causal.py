@@ -1,5 +1,10 @@
-"""Process ancestry consistency checks (not a full causal provenance graph)."""
+"""Conservative process ancestry consistency checks.
+
+An unseen parent is reported as unresolved context, not automatically scored as
+malicious: the parent may have started before the observation window.
+"""
 from collections import defaultdict
+
 
 def causal_features(events: list[dict]) -> dict:
     parents: dict[int, set[int]] = defaultdict(set)
@@ -16,7 +21,9 @@ def causal_features(events: list[dict]) -> dict:
         if event["parent_process_id"] > 0 and event["parent_process_id"] not in seen_pids:
             orphan_events += 1
     count = max(len(events), 1)
-    score = min(1.0, orphan_events / count + self_parent / count)
+    # Missing parent observations are common at window boundaries; do not score
+    # them as an anomaly without stronger temporal/provenance evidence.
+    score = min(1.0, self_parent / count)
     return {"unique_processes": len(seen_pids), "orphan_parent_events": orphan_events,
             "self_parent_events": self_parent, "parent_links": sum(len(v) for v in parents.values()),
             "causal_score": round(score, 6)}
