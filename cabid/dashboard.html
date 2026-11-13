@@ -1,0 +1,364 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CABID · behavioral integrity console</title>
+<style>
+  :root{
+    color-scheme: dark;
+    --bg:#0b0f15; --panel:#111823; --panel-2:#151e2b; --line:#1f2b3a;
+    --ink:#e7eef7; --muted:#8b9bb0; --accent:#5b9dff;
+    --high:#ff6b6b; --susp:#ffb347; --insuff:#6fa8ff; --ok:#4ecb71;
+    --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:radial-gradient(1200px 600px at 20% -10%,#16233a 0%,var(--bg) 55%);
+       color:var(--ink);font:14px/1.55 ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,sans-serif;
+       min-height:100vh}
+  header{display:flex;align-items:center;gap:14px;padding:16px 22px;border-bottom:1px solid var(--line);
+         background:#0d131c;position:sticky;top:0;z-index:5;flex-wrap:wrap}
+  .logo{display:flex;align-items:center;gap:10px;font-weight:700;letter-spacing:.02em}
+  .dot{width:10px;height:10px;border-radius:50%;background:var(--ok);box-shadow:0 0 12px var(--ok)}
+  header small{color:var(--muted);font-weight:400}
+  .spacer{flex:1}
+  button,select,input,textarea{font:inherit;color:var(--ink);background:var(--panel-2);
+        border:1px solid var(--line);border-radius:9px;padding:7px 11px}
+  button{cursor:pointer;transition:.15s border-color,.15s background}
+  button:hover{border-color:#31445c;background:#1a2434}
+  button.primary{background:linear-gradient(180deg,#2d6bff,#1f52d0);border-color:#3b76ff;font-weight:600}
+  button.primary:hover{background:linear-gradient(180deg,#3d79ff,#2458dc)}
+  main{display:grid;grid-template-columns:minmax(320px,400px) 1fr;gap:18px;padding:18px 22px 40px;
+       max-width:1500px;margin:0 auto}
+  @media (max-width:980px){main{grid-template-columns:1fr}}
+  .panel{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:16px}
+  .panel h2{margin:0 0 4px;font-size:.82rem;text-transform:uppercase;letter-spacing:.09em;color:var(--muted)}
+  .panel p.hint{margin:0 0 12px;color:var(--muted);font-size:.82rem}
+  label{display:block;font-size:.78rem;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);
+        margin:12px 0 5px}
+  textarea{width:100%;min-height:280px;font-family:var(--mono);font-size:12px;line-height:1.5;resize:vertical}
+  .row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+  .row > *{flex:1 1 auto}
+  .status{display:inline-flex;align-items:center;gap:8px;padding:5px 13px;border-radius:999px;
+          font-weight:700;font-size:.78rem;letter-spacing:.06em;border:1px solid transparent}
+  .NO_ANOMALY_DETECTED{color:var(--ok);border-color:#1c5130;background:#10251a}
+  .SUSPICIOUS{color:var(--susp);border-color:#5a3f14;background:#241a09}
+  .HIGH_RISK{color:var(--high);border-color:#5c1f1f;background:#2a1111}
+  .INSUFFICIENT_EVIDENCE{color:var(--insuff);border-color:#1e3a63;background:#0e1c2e}
+  .metrics{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:10px;margin:14px 0 4px}
+  .metric{background:var(--panel-2);border:1px solid var(--line);border-radius:11px;padding:11px 13px}
+  .metric span{display:block;color:var(--muted);font-size:.7rem;text-transform:uppercase;letter-spacing:.07em}
+  .metric strong{font-size:1.32rem;font-variant-numeric:tabular-nums}
+  .bar{height:9px;border-radius:6px;background:#1b2431;overflow:hidden;margin-top:6px}
+  .bar > i{display:block;height:100%;border-radius:6px;background:linear-gradient(90deg,#3f7bff,#6bb8ff)}
+  table{width:100%;border-collapse:collapse;font-size:.84rem}
+  th,td{text-align:left;padding:7px 9px;border-bottom:1px solid var(--line);vertical-align:top}
+  th{color:var(--muted);font-size:.7rem;text-transform:uppercase;letter-spacing:.07em}
+  code{font:.86em var(--mono);background:#0c1420;border:1px solid var(--line);padding:1px 5px;border-radius:5px}
+  .tabs{display:flex;gap:6px;border-bottom:1px solid var(--line);margin:18px 0 0;flex-wrap:wrap}
+  .tabs button{border:1px solid transparent;border-bottom:none;border-radius:9px 9px 0 0;background:transparent;
+               color:var(--muted)}
+  .tabs button[aria-selected="true"]{background:var(--panel-2);border-color:var(--line);color:var(--ink);
+               border-bottom-color:var(--panel-2);margin-bottom:-1px}
+  .tabpane{padding-top:14px}
+  .empty{color:var(--muted);padding:26px 4px;font-size:.9rem}
+  .spark{display:flex;align-items:flex-end;gap:2px;height:56px;margin-top:8px}
+  .spark i{flex:1;min-width:2px;border-radius:2px 2px 0 0;background:#2e62d4;opacity:.85}
+  .chip{display:inline-block;font-size:.72rem;padding:3px 9px;border-radius:999px;border:1px solid var(--line);
+        color:var(--muted);margin:0 6px 6px 0}
+  .err{color:var(--high);font-size:.84rem;margin-top:10px;white-space:pre-wrap}
+  .scroll{max-height:420px;overflow:auto}
+  #events-preview td{font-family:var(--mono);font-size:11.5px}
+  footer{color:var(--muted);font-size:.76rem;text-align:center;padding:0 22px 28px}
+  a{color:var(--accent)}
+</style>
+</head>
+<body>
+<header>
+  <div class="logo"><span class="dot"></span>CABID <small>behavioral integrity console</small></div>
+  <div class="spacer"></div>
+  <span class="chip" id="health">connecting…</span>
+  <a href="/api/datasets" id="raw-link"><button>API</button></a>
+</header>
+
+<main>
+  <section class="panel">
+    <h2>Input</h2>
+    <p class="hint">Paste JSONL events, or load a bundled synthetic fixture. Nothing leaves this host.</p>
+    <div class="row">
+      <select id="dataset" aria-label="bundled dataset"><option value="">bundled fixture…</option></select>
+      <button id="load">Load</button>
+    </div>
+    <label for="events">Events (JSONL)</label>
+    <textarea id="events" spellcheck="false" placeholder='{"timestamp":1760000000,"event_type":"process_start","process_id":100,"parent_process_id":1}'></textarea>
+    <div class="row">
+      <label for="window" style="margin:0">Window (s)</label>
+      <input id="window" type="number" min="1" step="1" placeholder="off">
+      <label for="policy" style="margin:0">Policy</label>
+      <select id="policy"><option value="off">off</option><option value="on">default policy</option></select>
+    </div>
+    <div class="row" style="margin-top:14px">
+      <button class="primary" id="run">Analyze ▸</button>
+      <button id="sample">Sample</button>
+    </div>
+    <div class="err" id="error" role="alert"></div>
+    <label>Benchmark</label>
+    <div class="row">
+      <input id="seed" type="number" value="20261113" aria-label="seed">
+      <input id="perclass" type="number" min="1" max="200" value="25" aria-label="samples per scenario">
+      <button id="bench">Run benchmark</button>
+    </div>
+  </section>
+
+  <section class="panel">
+    <h2>Verdict</h2>
+    <div class="row" style="justify-content:space-between;align-items:center">
+      <div><span class="status NO_ANOMALY_DETECTED" id="status">WAITING</span></div>
+      <div class="chip" id="digest">no report yet</div>
+    </div>
+    <div class="metrics">
+      <div class="metric"><span>Anomaly score</span><strong id="score">–</strong>
+        <div class="bar"><i id="scorebar" style="width:0%"></i></div></div>
+      <div class="metric"><span>Events</span><strong id="count">–</strong></div>
+      <div class="metric"><span>Coverage</span><strong id="coverage">–</strong></div>
+      <div class="metric"><span>Baseline</span><strong id="baseline">–</strong></div>
+    </div>
+    <div class="tabs" role="tablist">
+      <button role="tab" aria-selected="true" data-tab="why">Why</button>
+      <button role="tab" aria-selected="false" data-tab="components">Components</button>
+      <button role="tab" aria-selected="false" data-tab="lifecycle">Lifecycle</button>
+      <button role="tab" aria-selected="false" data-tab="policy">Policy</button>
+      <button role="tab" aria-selected="false" data-tab="windows">Windows</button>
+      <button role="tab" aria-selected="false" data-tab="bench">Benchmark</button>
+      <button role="tab" aria-selected="false" data-tab="events">Events</button>
+    </div>
+    <div class="tabpane" id="pane"><div class="empty">Run an analysis to see the explainable breakdown.</div></div>
+  </section>
+</main>
+<footer>CABID is an alpha research prototype. Scores are heuristics, not probabilities; missing telemetry is
+reported as insufficient evidence, never as safe.</footer>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let current = null;
+const esc = (value) => String(value ?? "").replace(/[&<>"']/g, (c) =>
+  ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const fmt = (value, digits = 3) => Number(value ?? 0).toFixed(digits);
+
+async function api(path, options) {
+  const response = await fetch(path, options);
+  let payload = null;
+  try { payload = await response.json(); } catch (_) { payload = null; }
+  if (!response.ok) throw new Error((payload && payload.error) || `HTTP ${response.status}`);
+  return payload;
+}
+
+function showError(message) { $("error").textContent = message || ""; }
+
+function renderVerdict(report) {
+  current = report;
+  const status = report.status || "UNKNOWN";
+  const badge = $("status");
+  badge.textContent = status.replace(/_/g, " ");
+  badge.className = "status " + esc(status);
+  $("score").textContent = fmt(report.anomaly_score);
+  $("scorebar").style.width = Math.min(100, Number(report.anomaly_score || 0) * 100).toFixed(1) + "%";
+  $("count").textContent = report.event_count ?? "–";
+  const coverage = report.completeness ? Number(report.completeness.completeness) * 100 : null;
+  $("coverage").textContent = coverage === null ? "–" : coverage.toFixed(0) + "%";
+  $("baseline").textContent = report.baseline_used ? "yes" : "no";
+  $("digest").textContent = report.config_digest ? "config " + String(report.config_digest).slice(0, 12) : "no report";
+  renderTab(activeTab());
+}
+
+function activeTab() {
+  const button = document.querySelector('.tabs button[aria-selected="true"]');
+  return button ? button.dataset.tab : "why";
+}
+
+function reasonTable(reasons) {
+  if (!reasons || !reasons.length) return '<div class="empty">No reasons recorded.</div>';
+  return '<table><tr><th>Code</th><th>Detail</th></tr>' + reasons.map((reason) =>
+    `<tr><td><code>${esc(reason.code)}</code></td><td>${esc(reason.detail)}</td></tr>`).join("") + "</table>";
+}
+
+function renderTab(tab) {
+  const pane = $("pane");
+  if (tab === "bench") { pane.innerHTML = benchHtml(); return; }
+  if (!current) { pane.innerHTML = '<div class="empty">Run an analysis to see the explainable breakdown.</div>'; return; }
+  const report = current;
+  if (tab === "why") {
+    pane.innerHTML = reasonTable(report.reasons) +
+      (report.score_semantics ? `<p class="hint" style="margin-top:10px">${esc(report.score_semantics)}</p>` : "");
+  } else if (tab === "components") {
+    const names = ["temporal", "causal", "sequence", "telemetry_gap", "novelty"];
+    const components = report.components || {}, weights = report.normalized_weights || {},
+          contribution = report.contribution || {};
+    pane.innerHTML = '<table><tr><th>Component</th><th>Value</th><th>Weight</th><th>Contribution</th>' +
+      '<th style="width:180px">Share</th></tr>' + names.map((name) => {
+        const share = Math.max(0, Math.min(1, Number(contribution[name] || 0)));
+        return `<tr><td>${esc(name.replace(/_/g, " "))}</td><td>${fmt(components[name])}</td>` +
+          `<td>${fmt(weights[name])}</td><td>${fmt(contribution[name])}</td>` +
+          `<td><div class="bar"><i style="width:${(share * 100).toFixed(1)}%"></i></div></td></tr>`;
+      }).join("") + "</table>";
+  } else if (tab === "lifecycle") {
+    const sequence = report.sequence || {};
+    const transitions = sequence.common_transitions || [];
+    pane.innerHTML = `<div class="metrics">
+        <div class="metric"><span>Processes</span><strong>${esc(sequence.process_count ?? 0)}</strong></div>
+        <div class="metric"><span>Contradictions</span><strong>${esc(sequence.contradiction_events ?? 0)}</strong></div>
+        <div class="metric"><span>After exit</span><strong>${esc(sequence.activity_after_exit ?? 0)}</strong></div>
+        <div class="metric"><span>Score</span><strong>${fmt(sequence.sequence_score)}</strong></div>
+      </div>` + (transitions.length
+        ? '<table><tr><th>Transition</th><th>Count</th></tr>' + transitions.map((item) =>
+            `<tr><td><code>${esc(item.from)}</code> → <code>${esc(item.to)}</code></td><td>${esc(item.count)}</td></tr>`).join("") + "</table>"
+        : '<div class="empty">No multi-step process transitions observed.</div>');
+  } else if (tab === "policy") {
+    const policy = report.policy;
+    if (!policy) {
+      pane.innerHTML = '<div class="empty">Policy evaluation is off for this run. Enable it in the input panel.</div>';
+      return;
+    }
+    const findings = policy.findings || [];
+    pane.innerHTML = `<div class="metrics">
+        <div class="metric"><span>Findings</span><strong>${esc(policy.finding_count ?? 0)}</strong></div>
+        <div class="metric"><span>Allow-listed events</span><strong>${esc(policy.allow_listed_events ?? 0)}</strong></div>
+        <div class="metric"><span>Suppressed codes</span><strong>${esc((policy.suppressed_reason_codes || []).length)}</strong></div>
+      </div>` + (findings.length
+        ? '<table><tr><th>Rule</th><th>Severity</th><th>Detail</th><th>Process</th></tr>' + findings.map((item) =>
+            `<tr><td><code>${esc(item.rule)}</code></td><td>${esc(item.severity)}</td><td>${esc(item.detail)}</td>` +
+            `<td>${esc(item.process_name || "unknown")}</td></tr>`).join("") + "</table>"
+        : '<div class="empty">No policy findings for this stream.</div>');
+  } else if (tab === "windows") {
+    const windows = report.windowed;
+    if (!windows) {
+      pane.innerHTML = '<div class="empty">Set a window size (seconds) and re-run to see per-window results.</div>';
+      return;
+    }
+    const spark = windows.windows.map((w) =>
+      `<i title="window ${esc(w.window_index)} · ${esc(w.status)} · ${fmt(w.anomaly_score)}" ` +
+      `style="height:${Math.max(4, Number(w.anomaly_score) * 100)}%;background:${statusColor(w.status)}"></i>`).join("");
+    pane.innerHTML = `<div class="spark">${spark}</div>
+      <table style="margin-top:14px"><tr><th>#</th><th>Start</th><th>Events</th><th>Status</th><th>Score</th><th>Top reason</th></tr>` +
+      windows.windows.map((w) => `<tr><td>${esc(w.window_index)}</td><td>${esc(w.start)}</td><td>${esc(w.event_count)}</td>` +
+        `<td><span class="status ${esc(w.status)}">${esc(w.status.replace(/_/g, " "))}</span></td>` +
+        `<td>${fmt(w.anomaly_score)}</td><td><code>${esc(w.top_reason)}</code></td></tr>`).join("") + "</table>";
+  } else if (tab === "events") {
+    const events = ($("events").value || "").split("\n").filter((line) => line.trim());
+    pane.innerHTML = `<div class="scroll"><table id="events-preview"><tr><th>#</th><th>Record</th></tr>` +
+      events.slice(0, 400).map((line, index) => `<tr><td>${index + 1}</td><td>${esc(line)}</td></tr>`).join("") +
+      `</table></div>` + (events.length > 400 ? `<p class="hint">Showing the first 400 of ${events.length} lines.</p>` : "");
+  }
+}
+
+function statusColor(status) {
+  return {HIGH_RISK: "#ff6b6b", SUSPICIOUS: "#ffb347", INSUFFICIENT_EVIDENCE: "#6fa8ff",
+          NO_ANOMALY_DETECTED: "#4ecb71"}[status] || "#2e62d4";
+}
+
+function benchHtml() {
+  if (!window.__bench) return '<div class="empty">Run the benchmark to compare models on generated fixtures.</div>';
+  const report = window.__bench;
+  const rows = Object.entries(report.models).map(([name, m]) =>
+    `<tr><td>${esc(name)}</td><td>${fmt(m.precision)}</td><td>${fmt(m.recall)}</td><td>${fmt(m.f1)}</td>` +
+    `<td>${fmt(m.false_positive_rate)}</td><td>${fmt(m.false_safe_rate)}</td><td>${esc(m.sample_count)}</td></tr>`).join("");
+  const scenarios = Object.entries(report.scenario_metrics || {}).map(([name, m]) =>
+    `<tr><td>${esc(name)}</td><td>${fmt(m.f1)}</td><td>${esc(m.sample_count)}</td></tr>`).join("");
+  return `<table><tr><th>Model</th><th>Precision</th><th>Recall</th><th>F1</th><th>FPR</th><th>False-safe</th><th>N</th></tr>${rows}</table>
+    <h2 style="margin-top:18px">Per scenario (telemetry-aware model)</h2>
+    <table><tr><th>Scenario</th><th>F1</th><th>N</th></tr>${scenarios}</table>
+    <p class="hint" style="margin-top:12px">${esc(report.warning || "")}</p>`;
+}
+
+document.querySelectorAll(".tabs button").forEach((button) => {
+  button.addEventListener("click", () => {
+    document.querySelectorAll(".tabs button").forEach((other) =>
+      other.setAttribute("aria-selected", String(other === button)));
+    renderTab(button.dataset.tab);
+  });
+});
+
+$("run").addEventListener("click", async () => {
+  showError("");
+  const body = { events: $("events").value };
+  const windowValue = $("window").value;
+  if (windowValue) body.window_seconds = Number(windowValue);
+  if ($("policy").value === "on") {
+    try { body.policy = (await api("/api/defaults")).policy; }
+    catch (err) { showError("could not load policy: " + err.message); return; }
+  }
+  try {
+    $("run").disabled = true;
+    renderVerdict(await api("/api/analyze", {
+      method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body),
+    }));
+  } catch (err) {
+    showError(err.message);
+  } finally {
+    $("run").disabled = false;
+  }
+});
+
+$("load").addEventListener("click", async () => {
+  showError("");
+  const name = $("dataset").value;
+  if (!name) { showError("pick a bundled fixture first"); return; }
+  try {
+    const payload = await api("/api/datasets/" + encodeURIComponent(name));
+    $("events").value = payload.events.map((event) => JSON.stringify(event)).join("\n");
+    if (activeTab() === "events") renderTab("events");
+  } catch (err) { showError(err.message); }
+});
+
+$("sample").addEventListener("click", () => {
+  $("events").value = [
+    '{"timestamp":1760000000,"event_type":"process_start","process_id":100,"parent_process_id":1,"process_name":"init"}',
+    '{"timestamp":1760000005,"event_type":"process_exec","process_id":100,"parent_process_id":1,"process_name":"init","executable":"/usr/bin/demo"}',
+    '{"timestamp":1760000010,"event_type":"file_write","process_id":100,"parent_process_id":1,"target":"/tmp/example.txt"}',
+    '{"timestamp":1760000015,"event_type":"network_connect","process_id":100,"parent_process_id":1,"target":"example.invalid:443"}',
+    '{"timestamp":1760000020,"event_type":"process_exit","process_id":100,"parent_process_id":1}',
+    '{"timestamp":1760000025,"event_type":"heartbeat","process_id":1,"parent_process_id":0}',
+  ].join("\n");
+  showError("");
+});
+
+$("bench").addEventListener("click", async () => {
+  showError("");
+  try {
+    $("bench").disabled = true;
+    window.__bench = await api(`/api/benchmark?seed=${encodeURIComponent($("seed").value)}&per_class=${encodeURIComponent($("perclass").value)}`);
+    document.querySelectorAll(".tabs button").forEach((other) =>
+      other.setAttribute("aria-selected", String(other.dataset.tab === "bench")));
+    renderTab("bench");
+  } catch (err) {
+    showError(err.message);
+  } finally {
+    $("bench").disabled = false;
+  }
+});
+
+(async () => {
+  try {
+    const health = await api("/api/health");
+    $("health").textContent = `CABID ${health.version} · online`;
+    const datasets = await api("/api/datasets");
+    for (const item of datasets.datasets || []) {
+      const option = document.createElement("option");
+      option.value = item.name;
+      option.textContent = item.name;
+      $("dataset").appendChild(option);
+    }
+    if ((datasets.datasets || []).length) {
+      $("dataset").value = datasets.datasets[0].name;
+      $("load").click();
+    } else {
+      $("sample").click();
+    }
+  } catch (err) {
+    $("health").textContent = "offline";
+    showError("dashboard API unreachable: " + err.message);
+  }
+})();
+</script>
+</body>
+</html>
