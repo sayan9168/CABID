@@ -632,3 +632,62 @@ def test_analyze_stream_cli_rejects_a_tiny_window(tmp_path, capsys):
                                   "process_id": 1}) + "\n", encoding="utf-8")
     assert main(["analyze-stream", str(source), "--window-seconds", "1"]) == 1
     assert "at least" in capsys.readouterr().err
+
+
+def test_fleet_cli_collects_and_marks_silence(tmp_path, capsys):
+    first = tmp_path / "a.json"
+    first.write_text(json.dumps({"status": "HIGH_RISK", "anomaly_score": 0.9,
+                                 "event_count": 10,
+                                 "completeness": {"completeness": 1.0},
+                                 "reasons": [{"code": "temporal_rate_or_burst"}]}),
+                     encoding="utf-8")
+    expected = tmp_path / "expected.txt"
+    expected.write_text("web-01\nweb-02\n", encoding="utf-8")
+    output = tmp_path / "fleet.json"
+    assert main(["fleet", f"web-01={first}", "--expected", str(expected),
+                 "--output", str(output)]) == 0
+    report = json.loads(output.read_text(encoding="utf-8"))
+    assert report["silent_hosts"] == ["web-02"]
+    assert report["degraded"] is True
+    capsys.readouterr()
+
+
+def test_fleet_cli_renders_markdown(tmp_path, capsys):
+    source = tmp_path / "a.json"
+    source.write_text(json.dumps({"status": "NO_ANOMALY_DETECTED", "anomaly_score": 0.01,
+                                  "event_count": 5,
+                                  "completeness": {"completeness": 1.0},
+                                  "reasons": []}), encoding="utf-8")
+    assert main(["fleet", f"web-01={source}", "--format", "md"]) == 0
+    assert "# CABID fleet report" in capsys.readouterr().out
+
+
+def test_fleet_cli_rejects_a_malformed_pair(tmp_path, capsys):
+    assert main(["fleet", "no-equals-sign"]) == 1
+    assert "HOST=REPORT.json" in capsys.readouterr().err
+
+
+def test_fleet_cli_compare_requires_both_snapshots(tmp_path, capsys):
+    source = tmp_path / "a.json"
+    source.write_text(json.dumps({"status": "NO_ANOMALY_DETECTED", "anomaly_score": 0.0,
+                                  "event_count": 1, "completeness": {"completeness": 1.0},
+                                  "reasons": []}), encoding="utf-8")
+    assert main(["fleet", "--compare", "--baseline", f"web-01={source}"]) == 1
+    assert "--baseline and --current" in capsys.readouterr().err
+
+
+def test_fleet_cli_compare_reports_a_regression(tmp_path, capsys):
+    before = tmp_path / "before.json"
+    before.write_text(json.dumps({"status": "NO_ANOMALY_DETECTED", "anomaly_score": 0.1,
+                                  "event_count": 1,
+                                  "completeness": {"completeness": 1.0}, "reasons": []}),
+                      encoding="utf-8")
+    after = tmp_path / "after.json"
+    after.write_text(json.dumps({"status": "HIGH_RISK", "anomaly_score": 0.9,
+                                 "event_count": 1,
+                                 "completeness": {"completeness": 1.0}, "reasons": []}),
+                     encoding="utf-8")
+    assert main(["fleet", "--compare", "--baseline", f"web-01={before}",
+                 "--current", f"web-01={after}"]) == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report["worsened"][0]["host"] == "web-01"

@@ -24,6 +24,12 @@ from .config import ConfigError, config_template, load_config
 from .corpus import CorpusError, catalogue as corpus_catalogue, fetch as corpus_fetch
 from .detector import analyze, analyze_windows, explain_score, render_score_explanation
 from .filters import FilterError, filter_events
+from .fleet import (
+    FleetError,
+    collect as collect_fleet,
+    compare as compare_fleets,
+    render_markdown as render_fleet_markdown,
+)
 from .explain import FORMATS, render, render_json
 from .history import DEFAULT_DB, HistoryError, compare_runs, list_runs, record_run
 from .ingest import normalize_many, read_jsonl
@@ -231,6 +237,21 @@ def _build_parser() -> argparse.ArgumentParser:
     corpus.add_argument("--refresh", action="store_true", help="re-download even if cached")
     corpus.add_argument("--offline", action="store_true", help="never touch the network")
 
+    fleet = sub.add_parser(
+        "fleet",
+        help="aggregate or compare reports across many hosts")
+    fleet.add_argument("pairs", nargs="*", metavar="HOST=REPORT.json",
+                       help="one HOST=REPORT.json argument per host")
+    fleet.add_argument("--compare", action="store_true",
+                       help="compare two snapshots instead of collecting one")
+    fleet.add_argument("--expected", help="file listing expected host names, one per line")
+    fleet.add_argument("--baseline", metavar="HOST=REPORT",
+                       help="baseline snapshot for compare (repeat by comma)")
+    fleet.add_argument("--current", metavar="HOST=REPORT",
+                       help="current snapshot for compare (repeat by comma)")
+    fleet.add_argument("--format", "-f", choices=("json", "md"), default="json")
+    fleet.add_argument("--output", "-o", help="write the fleet report")
+
     astream = sub.add_parser(
         "analyze-stream",
         help="score a JSONL stream window by window with bounded memory")
@@ -332,6 +353,56 @@ def _load_analyze_events(args) -> tuple[list[dict], dict]:
         events = read_jsonl(args.input[0])
     events, window = filter_events(events, getattr(args, "since", None), getattr(args, "until", None))
     return events, {"sources": sources_block, "time_filter": window}
+
+
+def _parse_host_pairs(items: list[str]) -> list[tuple[str, str]]:
+    pairs = []
+    for item in items:
+        for chunk in item.split(","):
+            chunk = chunk.strip()
+            if not chunk:
+                continue
+            host, separator, path = chunk.partition("=")
+            if not separator or not host or not path:
+                raise FleetError(f"expected HOST=REPORT.json, got {chunk!r}")
+            pairs.append((host.strip(), path.strip()))
+    return pairs
+
+
+def _cmd_fleet(args) -> int:
+    try:
+        if not args.compare:
+            pairs = _parse_host_pairs(args.pairs)
+            expected = None
+            if args.expected:
+                expected = [line.strip() for line in
+                            Path(args.expected).read_text(encoding="utf-8").splitlines()
+                            if line.strip()]
+            report = collect_fleet(pairs, expected_hosts=expected)
+        else:
+            baseline = _parse_host_pairs([args.baseline] if args.baseline else [])
+            current = _parse_host_pairs([args.current] if args.current else [])
+            if not baseline or not current:
+                raise FleetError("compare needs --baseline and --current host=report lists")
+            before = [_row_from(path, host) for host, path in baseline]
+            after = [_row_from(path, host) for host, path in current]
+            report = compare_fleets(before, after)
+    except (FleetError, OSError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    text = (render_fleet_markdown(report) if args.format == "md"
+            else json.dumps(report, indent=2, sort_keys=True) + "\n")
+    if args.output:
+        destination = Path(args.output)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_text(text, encoding="utf-8")
+    sys.stdout.write(text)
+    return 0
+
+
+def _row_from(path: str, host: str) -> dict:
+    from .fleet import _read_report, host_summary
+    return host_summary(_read_report(Path(path)), host=host, path=path)
 
 
 def _cmd_validate_baseline(args) -> int:
@@ -913,6 +984,8 @@ def main(argv: list[str] | None = None) -> int:
                 report_path.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8")
             print(json.dumps(summary, indent=2, sort_keys=True))
             return 0
+        if args.command == "fleet":
+            return _cmd_fleet(args)
         if args.command == "analyze-stream":
             try:
                 report = stream_file(args.input, window_seconds=args.window_seconds,
