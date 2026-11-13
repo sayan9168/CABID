@@ -17,6 +17,8 @@ Then open <http://127.0.0.1:8765/>.
   range (Since/Until), showing the kept/total event counts.
 - Opens a **Processes** tab with the per-pid rollup: risk bar, contradictions,
   sensitive hits — the same numbers as the CLI `entities` block.
+- **Rules** tab: which rules matched, severity, matched steps, affected pids.
+- **Tree** tab: node/edge/depth/cycle counters, structural findings, common edges.
 - Runs the synthetic benchmark with adjustable seed and sample count.
 
 ## API

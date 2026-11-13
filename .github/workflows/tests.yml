@@ -84,6 +84,39 @@ jobs:
               assert needle not in blob, f'history leaked {needle!r}'
           print('history content check ok')
           PY
+      - name: Correlation rules, tree, timeline and sealing
+        run: |
+          cabid analyze datasets/synthetic/tree-example.jsonl --format json -o /tmp/tree.json
+          python - <<'PY'
+          import json
+          report = json.load(open('/tmp/tree.json'))
+          assert report['tree']['cycle_count'] >= 1
+          assert report['tree']['max_depth'] >= 4
+          kinds = {f['kind'] for f in report['tree']['findings']}
+          assert 'interpreter_spawn' in kinds
+          ids = {f['rule_id'] for f in report['rules']['findings']}
+          assert 'shell-from-service' in ids
+          assert 'download-then-exec' in ids
+          # rule and tree output must not move the headline score
+          assert 'anomaly_score' in report and isinstance(report['components'], dict)
+          PY
+          cabid analyze datasets/synthetic/tree-example.jsonl --no-rules --no-tree             --format json -o /tmp/bare.json
+          python -c "import json;d=json.load(open('/tmp/bare.json'));assert 'rules' not in d and 'tree' not in d"
+          cabid timeline datasets/synthetic/tree-example.jsonl -f json --limit 4 -o /tmp/tl.json
+          python -c "import json;d=json.load(open('/tmp/tl.json'));assert d['row_count']==4 and d['truncated'];print('timeline ok')"
+          cabid analyze datasets/synthetic/example.jsonl --sign -o /tmp/sealed.json --quiet
+          cabid seal /tmp/sealed.json --verify --quiet > /tmp/seal.json
+          python -c "import json;assert json.load(open('/tmp/seal.json'))['verified'] is True"
+          python - <<'PY'
+          import json
+          doc = json.load(open('/tmp/sealed.json'))
+          doc['anomaly_score'] = 0.99
+          json.dump(doc, open('/tmp/tampered.json', 'w'))
+          PY
+          if cabid seal /tmp/tampered.json --verify --quiet > /tmp/tamper.json; then
+            echo "tampered report verified; sealing is broken"; exit 1
+          fi
+          python -c "import json;assert json.load(open('/tmp/tamper.json'))['verified'] is False;print('tamper detected')"
       - name: Dashboard smoke test
         run: |
           python - <<'PY'

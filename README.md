@@ -4,7 +4,7 @@
 
 CABID combines temporal activity, conservative process ancestry checks, and telemetry-class completeness over normalized event streams. It reports insufficient evidence when required event classes are absent.
 
-> Research status: alpha prototype (v0.5.0). Novelty and real-world detection performance are not established. Scores are heuristics, not probabilities.
+> Research status: alpha prototype (v0.6.0). Novelty and real-world detection performance are not established. Scores are heuristics, not probabilities.
 
 ## Features
 
@@ -25,6 +25,10 @@ CABID combines temporal activity, conservative process ancestry checks, and tele
 - Multi-source merge with provenance, duplicate counts, and overlap warnings
 - Inclusive time filtering (`--since`/`--until`, ISO-8601 or epoch)
 - Local SQLite run history and run-to-run comparison (`cabid history`)
+- Declarative correlation rules (sequence + count) with a five-rule built-in pack
+- Process-tree reconstruction: depth, cycles, interpreter-spawn and baseline edge drift
+- Chronological investigation timeline export (Markdown, plain text, JSON)
+- Tamper-evident report sealing (SHA-256 digest, optional HMAC) with `cabid seal`
 - Reports in JSON, Markdown, CSV, SARIF 2.1.0, and self-contained HTML
 - Local read-only dashboard (`cabid dashboard`) with no external assets
 - Best-effort unprivileged Linux /proc polling
@@ -78,6 +82,17 @@ See docs/configuration.md, docs/baseline.md, and docs/policy.md.
 The report ranks processes so triage starts at the right pid, and states the
 source files, duplicate counts, and any time-range trim. See docs/entities.md,
 docs/multi-source.md, and docs/history.md.
+
+## Correlate and hand off
+
+    cabid analyze events.jsonl --rules my-rules.json --format md -o report.md
+    cabid timeline events.jsonl -f txt --limit 500 > timeline.txt
+    cabid analyze events.jsonl --sign -o sealed.json && cabid seal sealed.json --verify
+
+Rules are JSON, so a new check needs no code. A rule match means the shape
+occurred, not that the host is compromised — see docs/rules.md. Report seals detect
+later edits; they are hash/HMAC integrity, not digital signatures — see
+docs/report-integrity.md.
 
 ## Stage it in CI
 
@@ -134,6 +149,10 @@ file_write, network_connect, process_exit, heartbeat. See docs/event-schema.md.
 | docs/entities.md | per-process rollup and its triage semantics |
 | docs/multi-source.md | merging artifacts and time filtering |
 | docs/history.md | local run history and comparisons |
+| docs/rules.md | correlation rule format and built-in pack |
+| docs/process-tree.md | tree reconstruction and structural findings |
+| docs/timeline.md | investigation timeline export |
+| docs/report-integrity.md | report sealing and what it does not prove |
 | docs/repo-metadata.md | repository topics and description (apply with `gh repo edit`) |
 | docs/policy.md | operator policy: sensitive targets, allow-lists, suppressions |
 | docs/reports.md | JSON/Markdown/CSV/SARIF/HTML reports and exit codes |

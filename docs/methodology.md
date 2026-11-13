@@ -12,7 +12,7 @@ sessions, a telemetry-aware detector will reduce false-safe classifications unde
 event loss compared with an otherwise identical detector that ignores completeness,
 without materially reducing recall on complete telemetry. This remains untested.
 
-## Scoring model (v0.5.0)
+## Scoring model (v0.6.0)
 
 The anomaly score is a normalised weighted sum of five transparent components:
 
@@ -33,6 +33,8 @@ Additional analysis surfaces, none of which modify the score:
 | `sources` | provenance, duplicates, overlap for multi-file input | 2+ inputs |
 | `time_filter` | what was trimmed and how much | `--since`/`--until` |
 | `history_comparison` | metric delta against a stored run | `--compare-history` |
+| `rules` | declarative pattern matches with evidence rows | `--rules` / built-in pack |
+| `tree` | ancestry structure, cycles, baseline edge drift | every report (`--no-tree` to skip) |
 
 A per-process rollup (`entities`) attributes contradictions, self-parent events,
 sensitive-target touches, and novelty to individual PIDs. It is a *triage aid*
@@ -59,8 +61,10 @@ alongside every verdict, so a reader can audit why a stream scored as it did.
    clock skew, and adversarial mimicry.
 
 ## Current status
-CABID v0.5.0 is an alpha research prototype. On top of the v0.4.0 engine it adds
-per-process rollups, multi-source merge with provenance, inclusive time filtering,
-and a local run history with run-to-run comparison. It still has no validated
-real-world benchmark, calibrated thresholds, complete kernel telemetry sensor, or
-verified novelty claim. Synthetic benchmark metrics are not operational IDS results.
+CABID v0.6.0 is an alpha research prototype. On top of the v0.5.0 surfaces it adds
+declarative correlation rules, process-tree reconstruction, timeline export, and
+report sealing. It still has no validated real-world benchmark, calibrated
+thresholds, complete kernel telemetry sensor, or verified novelty claim. Synthetic
+benchmark metrics are not operational IDS results. Rules and tree findings are
+deliberately outside the weighted score, so the headline number remains comparable
+across v0.4.0–v0.6.0 for the same configuration.

@@ -19,6 +19,8 @@ DEFAULT_POLICY: dict = {
     "sensitive_paths": [
         "/etc/shadow", "/etc/sudoers", "/etc/ssh/", "/root/", "/boot/",
         "/lib/systemd/system/", "/etc/systemd/system/",
+        "/etc/cron*", "/etc/rc.local", "/etc/ld.so.preload", "/etc/passwd",
+        "/var/spool/cron/",
     ],
     "sensitive_ports": [22, 23, 445, 3389, 2375, 6379],
     "allow_process_names": ["systemd", "sshd", "cron", "dbus-daemon", "systemd-journald"],

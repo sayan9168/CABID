@@ -18,7 +18,8 @@ class WatchState:
     """Incrementally ingest a JSONL file and score the trailing window."""
 
     def __init__(self, window_seconds: float = 300.0, config: dict | None = None,
-                 profile: dict | None = None, max_events: int = 20000) -> None:
+                 profile: dict | None = None, max_events: int = 20000,
+                 rules: list[dict] | None = None) -> None:
         if window_seconds <= 0:
             raise ValueError("window_seconds must be positive")
         if max_events <= 0:
@@ -26,6 +27,7 @@ class WatchState:
         self.window_seconds = float(window_seconds)
         self.config = config or {}
         self.profile = profile
+        self.rules = rules
         self.max_events = int(max_events)
         self.events: list[dict] = []
         self.offset = 0
@@ -69,7 +71,7 @@ class WatchState:
     def score(self) -> dict:
         self.batches += 1
         events = self.window()
-        report = analyze(events, self.config, self.profile)
+        report = analyze(events, self.config, self.profile, rules=self.rules)
         report["watch"] = {
             "batch": self.batches,
             "buffered_events": len(self.events),
@@ -82,7 +84,8 @@ class WatchState:
 
 def watch_file(path: str | Path, window_seconds: float = 300.0, interval: float = 2.0,
                iterations: int | None = None, config: dict | None = None,
-               profile: dict | None = None, on_report=None, sleep=time.sleep) -> list[dict]:
+               profile: dict | None = None, on_report=None, sleep=time.sleep,
+               rules: list[dict] | None = None) -> list[dict]:
     """Poll ``path`` and emit a report each time new data arrives.
 
     ``iterations`` bounds the number of polls (None = until interrupted) and
@@ -91,7 +94,7 @@ def watch_file(path: str | Path, window_seconds: float = 300.0, interval: float 
     """
     if interval < 0:
         raise ValueError("interval must not be negative")
-    state = WatchState(window_seconds, config, profile)
+    state = WatchState(window_seconds, config, profile, rules=rules)
     reports: list[dict] = []
     polls = 0
     while iterations is None or polls < iterations:

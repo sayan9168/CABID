@@ -136,6 +136,8 @@
       <button role="tab" aria-selected="true" data-tab="why">Why</button>
       <button role="tab" aria-selected="false" data-tab="components">Components</button>
       <button role="tab" aria-selected="false" data-tab="lifecycle">Lifecycle</button>
+      <button role="tab" aria-selected="false" data-tab="rules">Rules</button>
+      <button role="tab" aria-selected="false" data-tab="tree">Tree</button>
       <button role="tab" aria-selected="false" data-tab="entities">Processes</button>
       <button role="tab" aria-selected="false" data-tab="policy">Policy</button>
       <button role="tab" aria-selected="false" data-tab="windows">Windows</button>
@@ -229,6 +231,45 @@ function renderTab(tab) {
         ? '<table><tr><th>Transition</th><th>Count</th></tr>' + transitions.map((item) =>
             `<tr><td><code>${esc(item.from)}</code> → <code>${esc(item.to)}</code></td><td>${esc(item.count)}</td></tr>`).join("") + "</table>"
         : '<div class="empty">No multi-step process transitions observed.</div>');
+  } else if (tab === "rules") {
+    const rules = report.rules;
+    if (!rules) { pane.innerHTML = '<div class="empty">Rule evaluation was skipped for this run.</div>'; return; }
+    const findings = rules.findings || [];
+    const counts = rules.severity_counts || {};
+    pane.innerHTML = `<div class="metrics">
+        <div class="metric"><span>Rules</span><strong>${esc(rules.rule_count)}</strong></div>
+        <div class="metric"><span>Matched</span><strong>${esc(rules.matched_rule_count)}</strong></div>
+        <div class="metric"><span>Findings</span><strong>${esc(rules.finding_count)}</strong></div>
+      </div>
+      <p class="hint" style="margin:8px 0 12px">${esc(rules.semantics || "")}</p>` +
+      (findings.length
+        ? '<table><tr><th>Rule</th><th>Severity</th><th>Steps</th><th>PIDs</th></tr>' + findings.map((f) =>
+            `<tr><td><code>${esc(f.rule_id)}</code><div class="hint">${esc(f.title || "")}</div></td>` +
+            `<td><span class="status ${f.severity === "critical" || f.severity === "high" ? "HIGH_RISK" : "SUSPICIOUS"}">` +
+            `${esc(f.severity)}</span></td><td>${esc(f.matched_steps)}</td>` +
+            `<td>${esc((f.process_ids || []).join(", "))}</td></tr>`).join("") + "</table>"
+        : '<div class="empty">No rule matched this stream.</div>') +
+      (Object.keys(counts).length ? `<p class="hint">Severity counts: ${esc(JSON.stringify(counts))}</p>` : "");
+  } else if (tab === "tree") {
+    const tree = report.tree;
+    if (!tree) { pane.innerHTML = '<div class="empty">Tree reconstruction was skipped for this run.</div>'; return; }
+    const edges = tree.common_edges || [];
+    pane.innerHTML = `<div class="metrics">
+        <div class="metric"><span>Nodes</span><strong>${esc(tree.node_count)}</strong></div>
+        <div class="metric"><span>Edges</span><strong>${esc(tree.edge_count)}</strong></div>
+        <div class="metric"><span>Max depth</span><strong>${esc(tree.max_depth)}</strong></div>
+        <div class="metric"><span>Cycles</span><strong>${esc(tree.cycle_count)}</strong></div>
+      </div>
+      <p class="hint" style="margin:8px 0 12px">${esc(tree.semantics || "")}</p>` +
+      (tree.findings && tree.findings.length
+        ? '<table><tr><th>Kind</th><th>Severity</th><th>Detail</th></tr>' + tree.findings.map((f) =>
+            `<tr><td><code>${esc(f.kind)}</code></td><td>${esc(f.severity)}</td>` +
+            `<td>${esc(f.detail)}</td></tr>`).join("") + "</table>"
+        : '<div class="empty">No structural findings.</div>') +
+      (edges.length ? '<h2 style="margin-top:18px">Common edges</h2><table><tr><th>Parent</th><th>Child</th>' +
+        '<th>Count</th></tr>' + edges.slice(0, 10).map((e) =>
+          `<tr><td>${esc(e.parent)}</td><td>${esc(e.child)}</td><td>${esc(e.count)}</td></tr>`).join("") +
+        "</table>" : "");
   } else if (tab === "entities") {
     const entities = report.entities;
     if (!entities) { pane.innerHTML = '<div class="empty">No process rollup in this report.</div>'; return; }
