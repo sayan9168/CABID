@@ -463,3 +463,38 @@ def test_apply_writes_an_audit_trail(tmp_path, capsys):
     entries = [json.loads(line) for line in audit.read_text().splitlines()]
     assert entries[0]["event"] == "plan_start"
     assert entries[-1]["event"] == "plan_end"
+
+
+def test_corpus_list_cli_prints_pinned_digests(capsys):
+    assert main(["corpus", "list"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["corpora"][0]["name"] == "adfa-ld"
+
+
+def test_corpus_cli_requires_a_name_for_fetch(capsys):
+    assert main(["corpus", "fetch"]) == 2
+    assert "corpus name" in capsys.readouterr().err
+
+
+def test_corpus_cli_reports_missing_cache_without_network(tmp_path, capsys):
+    assert main(["corpus", "fetch", "adfa-ld", "--cache", str(tmp_path), "--offline"]) == 1
+    assert "offline" in capsys.readouterr().err
+
+
+def test_benchmark_real_cli_errors_when_corpus_absent(tmp_path, capsys):
+    assert main(["benchmark-real", "--corpus-cache", str(tmp_path)]) == 1
+    err = capsys.readouterr().err
+    assert "cabid corpus fetch adfa-ld" in err
+
+
+def test_benchmark_real_cli_runs_on_extracted_corpus(tmp_path, capsys):
+    from tests.test_realworld import _write_tree
+
+    root = _write_tree(tmp_path / "corpus")
+    output = tmp_path / "out" / "real.json"
+    assert main(["benchmark-real", "--corpus-root", str(root), "--output", str(output),
+                 "--format", "md"]) == 0
+    report = json.loads(output.read_text(encoding="utf-8"))
+    assert report["format"] == "cabid-realworld-benchmark/1"
+    assert output.with_suffix(".md").exists()
+    assert "not evidence of real-world" in output.with_suffix(".md").read_text(encoding="utf-8")

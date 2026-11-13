@@ -1,0 +1,303 @@
+{
+  "calibration": {
+    "calibration_percentile": 0.99,
+    "calibration_traces": 208,
+    "completeness_minimum_ratio": 0.666667,
+    "method": "percentile of held-out benign coverage and novelty scores",
+    "ngram_cutoff": 0.39796
+  },
+  "completeness_classes_used": [
+    "file_write",
+    "heartbeat",
+    "network_connect",
+    "process_exec",
+    "process_exit",
+    "process_start"
+  ],
+  "component_diagnostics": {
+    "mean_components_by_class": {
+      "attack": {
+        "causal": 0.0,
+        "class_diversity": 0.414348,
+        "novelty": 0.141026,
+        "sequence": 0.035068,
+        "temporal": 0.541573
+      },
+      "benign": {
+        "causal": 0.0,
+        "class_diversity": 0.550048,
+        "novelty": 0.209983,
+        "sequence": 0.070921,
+        "temporal": 0.651458
+      }
+    },
+    "note": "Means of each scoring component, computed with the telemetry gate disabled so the gate cannot mask the underlying signal. Class diversity is reported alongside because on this corpus it is what the gate reacts to."
+  },
+  "config_digest": "4cf579df6ef60c2981e960ae19b7ac986bfabad0e33fdee0da2e3acb2ec64431",
+  "corpus": {
+    "archive_sha256": "e6e73c16b294d14ed6ddfd50bfb7e52a0e3a6fcf40cc1981c2d40e7faed77eb2",
+    "event_classes_available": [
+      "file_write",
+      "kernel_state_change",
+      "network_connect",
+      "privilege_change",
+      "process_exec",
+      "process_start"
+    ],
+    "name": "adfa-ld",
+    "root": "/tmp/cabidcache/adfa-ld/data",
+    "source_commit": "79c6db0011ba4da0adeffdb5ce9b9f615547e1a1",
+    "source_url": "https://codeload.github.com/roopansh/Data-Mining-Project-CS244/zip/79c6db0011ba4da0adeffdb5ce9b9f615547e1a1",
+    "split": {
+      "calibration_traces": 208,
+      "evaluation_attack_traces": 746,
+      "evaluation_benign_traces": 4372,
+      "profile_fit_traces": 625,
+      "seed": 20261113
+    },
+    "trace_counts": {
+      "attack": 746,
+      "training": 833,
+      "validation": 4372
+    },
+    "window_seconds": 20.0
+  },
+  "coverage": {
+    "mappable_attack": 0.819035,
+    "mappable_benign": 0.952882,
+    "mappable_overall": 0.933372,
+    "note": "A trace is unmappable when none of its syscalls belongs to a CABID event class. Unmappable traces are counted as undetected in 'models' and dropped from 'models_mappable_only'. The gap between the two is the recall this pipeline structurally cannot reach on syscall-only data.",
+    "unmappable_attack_traces": 135,
+    "unmappable_benign_traces": 206
+  },
+  "decision_rule": "cabid_* models count any status other than NO_ANOMALY_DETECTED as positive; the n-gram model compares novel-ngram fraction against its calibrated cutoff.",
+  "evidence_sufficiency": {
+    "insufficient_evidence_rate_core": 0.933372,
+    "insufficient_evidence_rate_with_baseline": 0.933372,
+    "note": "INSUFFICIENT_EVIDENCE counts as a positive detection in every model above, because a session the engine refuses to judge is not a cleared session. These rates bound how much of the score is that refusal rather than a behavioural match."
+  },
+  "format": "cabid-realworld-benchmark/1",
+  "limitations": [
+    "ADFA-LD traces carry no timestamps, process ids, paths, or user identity. The adapter synthesises a 20-second window and a single synthetic process per trace, so CABID's ancestry, lifecycle, and rate detectors are not meaningfully exercised.",
+    "The corpus is from 2013 and records 32-bit userspace syscalls. Its six attack techniques are well known and appear throughout the intrusion-detection literature, so high scores are expected and are not evidence of real-world detection quality.",
+    "Only a minority of syscalls map to a CABID event class; unmapped calls are dropped. Reported event counts are therefore far smaller than trace lengths.",
+    "Attack classes are small (75-338 traces each). Confidence intervals are reported because point estimates on these sizes are unstable.",
+    "Traces are scored independently. ADFA-LD provides no notion of a host or a fleet, so no multi-host behaviour is measured here."
+  ],
+  "models": {
+    "cabid_core": {
+      "accuracy": 0.159633,
+      "f1": 0.221257,
+      "false_negative_rate": 0.180965,
+      "false_positive_rate": 0.952882,
+      "false_positive_rate_ci95": [
+        0.946194,
+        0.958775
+      ],
+      "fn": 135,
+      "fp": 4166,
+      "negative_count": 4372,
+      "positive_count": 746,
+      "precision": 0.127905,
+      "precision_ci95": [
+        0.118731,
+        0.137676
+      ],
+      "recall": 0.819035,
+      "recall_ci95": [
+        0.789796,
+        0.845005
+      ],
+      "sample_count": 5118,
+      "tn": 206,
+      "tp": 611
+    },
+    "cabid_gate_disabled": {
+      "accuracy": 0.853263,
+      "f1": 0.0,
+      "false_negative_rate": 1.0,
+      "false_positive_rate": 0.001144,
+      "false_positive_rate_ci95": [
+        0.000489,
+        0.002675
+      ],
+      "fn": 746,
+      "fp": 5,
+      "negative_count": 4372,
+      "positive_count": 746,
+      "precision": 0.0,
+      "precision_ci95": [
+        0.0,
+        0.434491
+      ],
+      "recall": 0.0,
+      "recall_ci95": [
+        0.0,
+        0.005123
+      ],
+      "sample_count": 5118,
+      "tn": 4367,
+      "tp": 0
+    },
+    "cabid_with_baseline": {
+      "accuracy": 0.159633,
+      "f1": 0.221257,
+      "false_negative_rate": 0.180965,
+      "false_positive_rate": 0.952882,
+      "false_positive_rate_ci95": [
+        0.946194,
+        0.958775
+      ],
+      "fn": 135,
+      "fp": 4166,
+      "negative_count": 4372,
+      "positive_count": 746,
+      "precision": 0.127905,
+      "precision_ci95": [
+        0.118731,
+        0.137676
+      ],
+      "recall": 0.819035,
+      "recall_ci95": [
+        0.789796,
+        0.845005
+      ],
+      "sample_count": 5118,
+      "tn": 206,
+      "tp": 611
+    },
+    "syscall_ngram_3gram": {
+      "accuracy": 0.855608,
+      "f1": 0.375317,
+      "false_negative_rate": 0.702413,
+      "false_positive_rate": 0.049177,
+      "false_positive_rate_ci95": [
+        0.043153,
+        0.055992
+      ],
+      "fn": 524,
+      "fp": 215,
+      "negative_count": 4372,
+      "positive_count": 746,
+      "precision": 0.508009,
+      "precision_ci95": [
+        0.46127,
+        0.554608
+      ],
+      "recall": 0.297587,
+      "recall_ci95": [
+        0.265883,
+        0.331365
+      ],
+      "sample_count": 5118,
+      "tn": 4157,
+      "tp": 222
+    }
+  },
+  "models_mappable_only": {
+    "cabid_core": {
+      "accuracy": 0.127905,
+      "f1": 0.2268,
+      "false_negative_rate": 0.0,
+      "false_positive_rate": 1.0,
+      "false_positive_rate_ci95": [
+        0.999079,
+        1.0
+      ],
+      "fn": 0,
+      "fp": 4166,
+      "negative_count": 4166,
+      "positive_count": 611,
+      "precision": 0.127905,
+      "precision_ci95": [
+        0.118731,
+        0.137676
+      ],
+      "recall": 1.0,
+      "recall_ci95": [
+        0.993752,
+        1.0
+      ],
+      "sample_count": 4777,
+      "tn": 0,
+      "tp": 611
+    },
+    "cabid_with_baseline": {
+      "accuracy": 0.127905,
+      "f1": 0.2268,
+      "false_negative_rate": 0.0,
+      "false_positive_rate": 1.0,
+      "false_positive_rate_ci95": [
+        0.999079,
+        1.0
+      ],
+      "fn": 0,
+      "fp": 4166,
+      "negative_count": 4166,
+      "positive_count": 611,
+      "precision": 0.127905,
+      "precision_ci95": [
+        0.118731,
+        0.137676
+      ],
+      "recall": 1.0,
+      "recall_ci95": [
+        0.993752,
+        1.0
+      ],
+      "sample_count": 4777,
+      "tn": 0,
+      "tp": 611
+    }
+  },
+  "per_technique_recall": {
+    "Adduser": {
+      "mappable_traces": 68,
+      "ngram_recall": 0.373626,
+      "recall": 0.747253,
+      "traces": 91
+    },
+    "Hydra_FTP": {
+      "mappable_traces": 142,
+      "ngram_recall": 0.333333,
+      "recall": 0.876543,
+      "traces": 162
+    },
+    "Hydra_SSH": {
+      "mappable_traces": 151,
+      "ngram_recall": 0.198864,
+      "recall": 0.857955,
+      "traces": 176
+    },
+    "Java_Meterpreter": {
+      "mappable_traces": 87,
+      "ngram_recall": 0.298387,
+      "recall": 0.701613,
+      "traces": 124
+    },
+    "Meterpreter": {
+      "mappable_traces": 69,
+      "ngram_recall": 0.266667,
+      "recall": 0.92,
+      "traces": 75
+    },
+    "Web_Shell": {
+      "mappable_traces": 94,
+      "ngram_recall": 0.355932,
+      "recall": 0.79661,
+      "traces": 118
+    },
+    "benign": {
+      "mappable_traces": 4166,
+      "ngram_recall": 0.0,
+      "recall": 0.0,
+      "traces": 4372
+    }
+  },
+  "reproduce": "cabid benchmark-real --corpus-cache <dir> --output results/adfa-realworld.json",
+  "score_separation": {
+    "cabid_anomaly_score_auc": 0.356003,
+    "note": "Threshold-free class separation. 0.5 means the score is uninformative on this corpus; 1.0 means perfect ranking. Where the gated metrics are poor but the AUC is also near 0.5, the problem is the score, not the threshold.",
+    "syscall_ngram_auc": 0.675149
+  }
+}

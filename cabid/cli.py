@@ -13,6 +13,7 @@ from .baseline import build_profile, drift_suggestions, load_profile, write_prof
 from .benchmark import run_benchmark
 from .collector import collect_to_jsonl
 from .config import ConfigError, config_template, load_config
+from .corpus import CorpusError, catalogue as corpus_catalogue, fetch as corpus_fetch
 from .detector import analyze, analyze_windows, explain_score, render_score_explanation
 from .filters import FilterError, filter_events
 from .explain import FORMATS, render, render_json
@@ -20,6 +21,7 @@ from .history import DEFAULT_DB, HistoryError, compare_runs, list_runs, record_r
 from .ingest import normalize_many, read_jsonl
 from .normalize import EventError
 from .policy import PolicyError, evaluate_policy, load_policy
+from .realworld import run_adfa_benchmark
 from .rules import RuleError, load_rules
 from .executor import ExecutionError, dry_run, execute_plan
 from .response import ACTIONS, ResponseError, build_plan, render_plan, write_plan
@@ -212,6 +214,29 @@ def _build_parser() -> argparse.ArgumentParser:
                          help="audit trail for --apply (default: alongside the report)")
     respond.add_argument("--quiet", "-q", action="store_true")
 
+    corpus = sub.add_parser("corpus", help="list, fetch or verify public benchmark corpora")
+    corpus.add_argument("action", nargs="?", choices=("list", "fetch", "verify"), default="list")
+    corpus.add_argument("name", nargs="?", help="corpus name (see 'cabid corpus list')")
+    corpus.add_argument("--cache", help="cache directory (default: $CABID_CACHE or ~/.cache/cabid)")
+    corpus.add_argument("--refresh", action="store_true", help="re-download even if cached")
+    corpus.add_argument("--offline", action="store_true", help="never touch the network")
+
+    real = sub.add_parser(
+        "benchmark-real",
+        help="run the real-world benchmark on a public intrusion corpus")
+    real.add_argument("--corpus-cache", help="cache directory holding the fetched corpus")
+    real.add_argument("--corpus-root", help="use an already-extracted corpus directory")
+    real.add_argument("--window-seconds", type=float, default=20.0)
+    real.add_argument("--ngram-size", type=int, default=3)
+    real.add_argument("--calibration-fraction", type=float, default=0.25)
+    real.add_argument("--calibration-percentile", type=float, default=0.99)
+    real.add_argument("--seed", type=int, default=20261113)
+    real.add_argument("--config", "-c", help="analysis configuration JSON")
+    real.add_argument("--output", "-o", default="results/adfa-realworld.json")
+    real.add_argument("--format", "-f", choices=("json", "md"), default="json")
+    real.add_argument("--require-verified", action="store_true",
+                      help="refuse to run unless the cached archive matches its pinned digest")
+
     doctor = sub.add_parser("doctor", help="check environment, telemetry sources and configuration")
     doctor.add_argument("--input", help="optional JSONL file to validate")
     doctor.add_argument("--config", "-c")
@@ -253,6 +278,76 @@ def _load_analyze_events(args) -> tuple[list[dict], dict]:
         events = read_jsonl(args.input[0])
     events, window = filter_events(events, getattr(args, "since", None), getattr(args, "until", None))
     return events, {"sources": sources_block, "time_filter": window}
+
+
+def _cmd_corpus(args) -> int:
+    if args.action == "list":
+        print(json.dumps({"format": "cabid-corpus/1", "corpora": corpus_catalogue()},
+                         indent=2, sort_keys=True))
+        return 0
+    if not args.name:
+        print("error: a corpus name is required for fetch/verify", file=sys.stderr)
+        return 2
+    try:
+        if args.action == "fetch":
+            result = corpus_fetch(args.name, args.cache, refresh=args.refresh,
+                                  offline=args.offline)
+        else:
+            from .corpus import verify as corpus_verify
+            result = corpus_verify(args.name, args.cache)
+    except CorpusError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    print(json.dumps(result, indent=2, sort_keys=True))
+    return 0
+
+
+def _cmd_benchmark_real(args) -> int:
+    from .corpus import load_manifest, verify as corpus_verify
+
+    root = args.corpus_root
+    cache = None
+    if root is None:
+        try:
+            if args.require_verified:
+                checked = corpus_verify("adfa-ld", args.corpus_cache)
+                if not checked["verified"]:
+                    print(f"error: corpus checksum mismatch: {checked['actual_sha256']}",
+                          file=sys.stderr)
+                    return 1
+            manifest = load_manifest("adfa-ld", args.corpus_cache)
+        except CorpusError as exc:
+            print(f"error: {exc}\nhint: run 'cabid corpus fetch adfa-ld' first",
+                  file=sys.stderr)
+            return 1
+        root = manifest.get("path")
+        cache = {"archive_sha256": manifest.get("archive_sha256"),
+                 "source_url": manifest.get("source_url"),
+                 "source_commit": manifest.get("source_commit")}
+    try:
+        report = run_adfa_benchmark(
+            root,
+            window_seconds=args.window_seconds,
+            ngram_size=args.ngram_size,
+            calibration_fraction=args.calibration_fraction,
+            calibration_percentile=args.calibration_percentile,
+            seed=args.seed,
+            config=load_config(args.config),
+        )
+    except (ValueError, ConfigError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    if cache is not None:
+        report["corpus"].update({k: v for k, v in cache.items() if v})
+    destination = Path(args.output)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    if args.format == "md":
+        markdown = Path(args.output).with_suffix(".md")
+        markdown.parent.mkdir(parents=True, exist_ok=True)
+        markdown.write_text(_realworld_markdown(report), encoding="utf-8")
+    print(json.dumps(report, indent=2, sort_keys=True))
+    return 0
 
 
 def _cmd_analyze(args) -> int:
@@ -687,6 +782,10 @@ def main(argv: list[str] | None = None) -> int:
                 report_path.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8")
             print(json.dumps(summary, indent=2, sort_keys=True))
             return 0
+        if args.command == "corpus":
+            return _cmd_corpus(args)
+        if args.command == "benchmark-real":
+            return _cmd_benchmark_real(args)
         if args.command == "benchmark":
             report = run_benchmark(args.output, args.seed, args.per_class,
                                    config=load_config(args.config),
@@ -737,6 +836,41 @@ def main(argv: list[str] | None = None) -> int:
             FilterError, RuleError, SealError, SigmaError, ResponseError, ExecutionError,
             json.JSONDecodeError, ValueError) as exc:
         return _fail(str(exc))
+
+
+def _realworld_markdown(report: dict) -> str:
+    corpus = report.get("corpus", {})
+    lines = ["# CABID real-world benchmark (ADFA-LD)", ""]
+    lines.append("> Real public corpus, but a 2013 syscall-trace dataset with no timestamps,")
+    lines.append("> pids or paths. These numbers measure pipeline behaviour on that data;")
+    lines.append("> they are not evidence of real-world intrusion detection quality.")
+    lines.append("")
+    counts = corpus.get("trace_counts", {})
+    lines.append(f"Corpus traces: {counts.get('training', '?')} training, "
+                 f"{counts.get('validation', '?')} validation, {counts.get('attack', '?')} attack.")
+    lines.append("")
+    lines += ["| Model | Precision | Recall | F1 | FPR | Samples |", "| --- | --- | --- | --- | --- | --- |"]
+    for name, values in sorted(report.get("models", {}).items()):
+        lines.append(f"| {name} | {values['precision']:.3f} | {values['recall']:.3f} | "
+                     f"{values['f1']:.3f} | {values['false_positive_rate']:.3f} | "
+                     f"{values['sample_count']} |")
+    recall_ci = report.get("models", {}).get("cabid_with_baseline", {}).get("recall_ci95")
+    if recall_ci:
+        lines += ["", f"95% Wilson interval on CABID recall: {recall_ci[0]:.3f} to {recall_ci[1]:.3f}."]
+    separation = report.get("score_separation", {})
+    if separation:
+        lines += ["", f"Threshold-free separation (AUC): CABID anomaly score "
+                      f"{separation.get('cabid_anomaly_score_auc')}, "
+                      f"syscall n-gram {separation.get('syscall_ngram_auc')}."]
+    coverage = report.get("coverage", {})
+    if coverage:
+        lines += ["", f"Traces the event mapping could not represent: "
+                      f"{coverage.get('unmappable_attack_traces')} attack, "
+                      f"{coverage.get('unmappable_benign_traces')} benign. "
+                      "These are counted as undetected."]
+    lines += ["", "## Limitations", ""]
+    lines += [f"- {item}" for item in report.get("limitations", [])]
+    return "\n".join(lines) + "\n"
 
 
 def _benchmark_markdown(report: dict) -> str:
