@@ -5,65 +5,83 @@ repository settings, not files, so they cannot be applied from a commit. This pa
 records the intended set so it can be applied reproducibly by whoever owns the
 repository.
 
-## Apply
+## The 20 topics
 
-With the GitHub CLI authenticated as a repository admin:
+| # | Topic | Why |
+| --- | --- | --- |
+| 1 | `linux` | platform |
+| 2 | `python` | language |
+| 3 | `cybersecurity` | domain |
+| 4 | `security-tools` | category |
+| 5 | `security-research` | project framing |
+| 6 | `intrusion-detection` | core problem |
+| 7 | `hids` | host-based IDS category |
+| 8 | `anomaly-detection` | method |
+| 9 | `behavioral-analysis` | method |
+| 10 | `threat-detection` | outcome |
+| 11 | `blue-team` | practitioner audience |
+| 12 | `incident-response` | workflow use |
+| 13 | `dfir` | forensics/IR audience |
+| 14 | `endpoint-security` | host telemetry domain |
+| 15 | `telemetry` | completeness gate is central |
+| 16 | `auditd` | supported source |
+| 17 | `procfs` | supported source |
+| 18 | `log-analysis` | input format |
+| 19 | `explainable-ai` | every verdict carries ordered reasons |
+| 20 | `sarif` | report export format |
+
+Deliberately **excluded**: `machine-learning` and `deep-learning` (weights are
+hand-set, not learned), `ebpf` (no kernel sensor is shipped), `edr` (the project
+states it is not an EDR), `sigma` (no Sigma support). Tagging those would mislead
+people arriving from topic pages.
+
+## Apply — option 1: GitHub CLI
+
+`--add-topic` takes a comma-separated list, so this is one command:
 
 ```bash
 gh repo edit sayan9168/CABID \
-  --add-topic linux \
-  --add-topic cybersecurity \
-  --add-topic security-tools \
-  --add-topic intrusion-detection \
-  --add-topic anomaly-detection \
-  --add-topic behavioral-analysis \
-  --add-topic threat-detection \
-  --add-topic telemetry \
-  --add-topic auditd \
-  --add-topic procfs \
-  --add-topic explainable-ai \
-  --add-topic security-research \
-  --add-topic dfir \
-  --add-topic endpoint-security \
-  --add-topic sarif \
-  --add-topic python \
-  --add-topic cli
+  --add-topic linux,cybersecurity,security-tools,intrusion-detection,anomaly-detection,behavioral-analysis,threat-detection,hids,blue-team,incident-response,dfir,endpoint-security,security-research,telemetry,auditd,procfs,log-analysis,explainable-ai,sarif,python
 ```
 
-Or via the REST API (replace the token):
+## Apply — option 2: REST API
+
+Topics are **replaced** by this call, which makes it fully idempotent — running it
+twice gives the same 20 topics:
 
 ```bash
-curl -L -X PUT \
+GITHUB_TOKEN=ghp_xxx   # needs a classic token with the `public_repo` scope (repo admin)
+curl -sS -X PUT \
   -H "Accept: application/vnd.github+json" \
   -H "Authorization: Bearer $GITHUB_TOKEN" \
   https://api.github.com/repos/sayan9168/CABID/topics \
-  -d '{"names":["linux","cybersecurity","security-tools","intrusion-detection",
-       "anomaly-detection","behavioral-analysis","threat-detection","telemetry",
-       "auditd","procfs","explainable-ai","security-research","dfir",
-       "endpoint-security","sarif","python","cli"]}'
+  -d '{"names":["linux","cybersecurity","security-tools","intrusion-detection","anomaly-detection","behavioral-analysis","threat-detection","hids","blue-team","incident-response","dfir","endpoint-security","security-research","telemetry","auditd","procfs","log-analysis","explainable-ai","sarif","python"]}' \
+  | python3 -c 'import json,sys; d=json.load(sys.stdin); print(len(d["names"]), "topics:", ", ".join(sorted(d["names"])))'
 ```
 
-Note: topics need the repository **administration** permission. Automations and
-GitHub App tokens are commonly limited to `contents`/`metadata` and receive
-`403 Resource not accessible by integration` even when other admin actions work.
+## Apply — option 3: web UI
+
+<https://github.com/sayan9168/CABID> → gear icon next to **About** → paste the
+topics one at a time → **Save changes**.
+
+## Verify
+
+```bash
+gh repo view sayan9168/CABID --json repositoryTopics --jq '[.repositoryTopics[].name] | (length|tostring) + " topics: " + join(", ")'
+```
+
+Expected: `20 topics: anomaly-detection, auditd, ...`
+
+## Via an automation token
+
+Tokens issued to GitHub Apps / integrations are commonly limited to
+`contents`/`metadata` and receive `403 Resource not accessible by integration` on
+this endpoint even when the repository shows `admin: true` in
+`gh api repos/OWNER/REPO --jq .permissions`. Apply topics from an interactive
+`gh auth login` session or the web UI instead.
 
 ## Suggested description
 
 > A resource-efficient Linux cybersecurity research framework combining temporal
 > behavior analysis, causal process relationships, and telemetry-aware confidence
 > to detect and explain suspicious system activity.
-
-## Why this set
-
-- **Discovery:** `linux`, `python`, `cli` — language and interface.
-- **Domain:** `cybersecurity`, `security-tools`, `security-research`, `dfir`,
-  `endpoint-security`, `threat-detection`.
-- **Technique:** `intrusion-detection`, `anomaly-detection`, `behavioral-analysis`,
-  `explainable-ai` — matches the actual method (weighted heuristics with reasons,
-  not a learned model).
-- **Telemetry:** `telemetry`, `auditd`, `procfs` — the sources actually supported.
-- **Interop:** `sarif` — reports export to SARIF 2.1.0.
-
-Avoid `machine-learning`, `deep-learning`, `ebpf`, `sigma`, and `edr`: the project
-uses hand-set heuristic weights, ships no kernel sensor, and is explicitly not an
-EDR. Mislabelling there would mislead people who find the repo by topic.
