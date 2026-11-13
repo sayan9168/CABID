@@ -47,11 +47,54 @@ Interpretation:
   **not scored**, mirroring the ancestry policy: absence of history is context,
   not proof of malice.
 
+## Keeping a profile current: `baseline-drift`
+
+A stagnant profile is a silent failure mode. A package upgrade adds an executable,
+the profile still says the old one is the only legitimate binary, and benign
+activity starts scoring as novel. Nobody notices until the alerts are ignored.
+
+    cabid baseline-drift baseline-profile.json session-a.jsonl session-b.jsonl
+
+The output is a *diff for review*, never a rewrite:
+
+```json
+{
+  "sessions_evaluated": 2,
+  "min_support": 2,
+  "suggestion_count": 3,
+  "new_processes": [
+    {"process_name": "snapd", "executables": ["/usr/lib/snapd/snapd"], "sessions": 2}
+  ],
+  "new_executables": [
+    {"process_name": "cron", "new_executables": ["/usr/sbin/cron2"], "sessions": 2}
+  ],
+  "new_parent_child_edges": [
+    {"parent": "init", "child": "snapd", "occurrences": 12, "sessions": 2}
+  ],
+  "applied": false
+}
+```
+
+Three properties are deliberate:
+
+- **`applied` is always `false`.** The profile file is never modified. Widening a
+  baseline is a judgement call about what is benign, and that call belongs to the
+  operator.
+- **Support is per session, not per occurrence.** A suggestion needs agreement from
+  at least `--min-support` sessions (default 2). One odd-but-benign session cannot
+  widen the baseline on its own. Note that edges are counted the same way: twelve
+  occurrences inside one session is still one session of support.
+- **Drift and compromise look identical in a diff.** A new process that appeared
+  after an upgrade and a new process that appeared after an intrusion produce the
+  same suggestion. Reviewing the suggestion is the work; accepting it blindly is
+  how a baseline becomes useless.
+
 ## Limitations
 
 - Profiles are only as good as their labels. Contaminated benign data hides
   real anomalies.
 - A profile is a snapshot in time; rebuild it after planned deployments, or the
-  new binaries look novel forever.
+  new binaries look novel forever. `baseline-drift` exists so you find out which
+  binaries, rather than guessing.
 - Novelty weights the score only when a profile is supplied. Comparing runs with
   and without a profile is an experiment change, not a bug fix.

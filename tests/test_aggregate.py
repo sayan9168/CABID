@@ -57,3 +57,38 @@ def test_invalid_file_reports_line_number(tmp_path):
     bad.write_text('{"timestamp": 1, "event_type": "nope", "process_id": 1}\n', encoding="utf-8")
     with pytest.raises(IngestError, match=":1:"):
         ingest_sources([bad])
+
+
+def test_no_inputs_is_an_error():
+    import pytest
+
+    from cabid.aggregate import IngestError, ingest_sources
+
+    with pytest.raises(IngestError, match="at least one input"):
+        ingest_sources([])
+
+
+def test_a_malformed_source_aborts_the_whole_merge(tmp_path):
+    import pytest
+
+    from cabid.aggregate import IngestError, ingest_sources
+
+    good = tmp_path / "good.jsonl"
+    good.write_text('{"timestamp":1,"event_type":"heartbeat","process_id":1,'
+                    '"parent_process_id":0,"process_name":"a"}\n', encoding="utf-8")
+    bad = tmp_path / "bad.jsonl"
+    bad.write_text('{"timestamp":"not-a-time"}\n', encoding="utf-8")
+    with pytest.raises(IngestError):
+        ingest_sources([good, bad])
+
+
+def test_empty_source_is_reported_not_ignored(tmp_path):
+    from cabid.aggregate import ingest_sources
+
+    empty = tmp_path / "empty.jsonl"
+    empty.write_text("", encoding="utf-8")
+    merged = ingest_sources([empty])
+    assert merged["source_count"] == 1
+    assert merged["events"] == []
+    assert merged["events_total"] == 0
+    assert merged["first_timestamp"] is None

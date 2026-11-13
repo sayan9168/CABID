@@ -12,7 +12,7 @@ sessions, a telemetry-aware detector will reduce false-safe classifications unde
 event loss compared with an otherwise identical detector that ignores completeness,
 without materially reducing recall on complete telemetry. This remains untested.
 
-## Scoring model (v0.6.0)
+## Scoring model (v0.7.0)
 
 The anomaly score is a normalised weighted sum of five transparent components:
 
@@ -61,10 +61,35 @@ alongside every verdict, so a reader can audit why a stream scored as it did.
    clock skew, and adversarial mimicry.
 
 ## Current status
-CABID v0.6.0 is an alpha research prototype. On top of the v0.5.0 surfaces it adds
-declarative correlation rules, process-tree reconstruction, timeline export, and
-report sealing. It still has no validated real-world benchmark, calibrated
-thresholds, complete kernel telemetry sensor, or verified novelty claim. Synthetic
-benchmark metrics are not operational IDS results. Rules and tree findings are
-deliberately outside the weighted score, so the headline number remains comparable
-across v0.4.0–v0.6.0 for the same configuration.
+CABID v0.7.0 is an alpha research prototype. On top of the v0.6.0 surfaces it
+widens auditd coverage, adds container scoping and clock-skew estimation, and
+integrates with Sigma and STIX. It still has no validated real-world benchmark,
+calibrated thresholds, complete kernel telemetry sensor, or verified novelty
+claim. Synthetic benchmark metrics are not operational IDS results. Rules, tree
+findings, container scopes, and Sigma imports are deliberately outside the
+weighted score, so the headline number remains comparable across v0.4.0–v0.7.0 for
+the same configuration.
+
+### The one scoring change in v0.7.0
+
+`completeness.expected_event_types` used to list the four auditd-only classes
+alongside the six core ones. A procfs stream could never satisfy that, so it was
+always `INSUFFICIENT_EVIDENCE` while an auditd stream with the same real coverage
+could look complete. The default is now the six core classes, and
+`temporal.type_diversity` is likewise computed over the core set.
+
+This is a correctness fix, not a tuning change, but it does mean a procfs report
+from v0.7.0 can carry a different status than the same input under v0.6.0. Any
+comparison across that boundary should re-run both sides.
+
+### What is still missing
+
+An honest list, because a missing benchmark is not a detail:
+
+- **No real-host benchmark.** Every number in the repository comes from synthetic
+  fixtures. Precision, recall, and false-positive rate against real enterprise
+  telemetry are unmeasured.
+- **No calibrated thresholds.** `suspicious` and `high` are hand-set defaults.
+- **No sensor.** CABID reads logs; it does not collect kernel events.
+- **No validated novelty claim.** Baseline novelty is a heuristic distance, not a
+  statistically validated detector, and it depends entirely on operator labels.

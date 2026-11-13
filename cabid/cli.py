@@ -9,11 +9,11 @@ from pathlib import Path
 from . import __version__
 from .audit import parse_audit_raw
 from .aggregate import IngestError, ingest_sources
-from .baseline import build_profile, load_profile, write_profile
+from .baseline import build_profile, drift_suggestions, load_profile, write_profile
 from .benchmark import run_benchmark
 from .collector import collect_to_jsonl
 from .config import ConfigError, config_template, load_config
-from .detector import analyze, analyze_windows
+from .detector import analyze, analyze_windows, explain_score, render_score_explanation
 from .filters import FilterError, filter_events
 from .explain import FORMATS, render, render_json
 from .history import DEFAULT_DB, HistoryError, compare_runs, list_runs, record_run
@@ -21,6 +21,8 @@ from .ingest import normalize_many, read_jsonl
 from .normalize import EventError
 from .policy import PolicyError, evaluate_policy, load_policy
 from .rules import RuleError, load_rules
+from .sigma import SigmaError, import_sigma
+from .stix import build_bundle, write_bundle
 from .signature import SealError, seal_report, sign_file, verify_file
 from .timeline import build_timeline, render_timeline_markdown, render_timeline_text
 from .watch import watch_file
@@ -75,7 +77,9 @@ def _build_parser() -> argparse.ArgumentParser:
         description="Telemetry-aware Linux behavior analysis (research prototype)",
     )
     parser.add_argument("--version", action="version", version=f"CABID {__version__}")
-    sub = parser.add_subparsers(dest="command", required=True)
+    # Not required: `cabid` alone should print help and exit 0, the way most CLIs
+    # behave. main() handles the missing-command case explicitly.
+    sub = parser.add_subparsers(dest="command")
 
     run = sub.add_parser("analyze", help="analyze one or more JSONL event streams")
     run.add_argument("input", nargs="+", help="JSONL file(s); multiple files are merged")
@@ -104,6 +108,8 @@ def _build_parser() -> argparse.ArgumentParser:
                      help="HMAC key read from this environment variable when sealing")
     run.add_argument("--sign", action="store_true",
                      help="add an integrity seal to JSON output")
+    run.add_argument("--explain-score", action="store_true",
+                     help="print the score as arithmetic, term by term")
 
     tl = sub.add_parser("timeline", help="export a chronological investigation timeline")
     tl.add_argument("input", nargs="+")
@@ -116,6 +122,17 @@ def _build_parser() -> argparse.ArgumentParser:
     tl.add_argument("--rules", "-r")
     tl.add_argument("--since")
     tl.add_argument("--until")
+
+    sig = sub.add_parser("import-sigma", help="translate a Sigma YAML rule into a CABID rule pack")
+    sig.add_argument("input", help="Sigma .yml file")
+    sig.add_argument("--output", "-o", required=True)
+    sig.add_argument("--quiet", "-q", action="store_true")
+
+    export = sub.add_parser("export-stix", help="export a JSON report as a STIX 2.1 bundle")
+    export.add_argument("report", help="CABID JSON report")
+    export.add_argument("--output", "-o", required=True)
+    export.add_argument("--host", default="unknown-host")
+    export.add_argument("--quiet", "-q", action="store_true")
 
     seal = sub.add_parser("seal", help="seal a JSON report or verify an existing seal")
     seal.add_argument("report")
@@ -155,6 +172,16 @@ def _build_parser() -> argparse.ArgumentParser:
     profile.add_argument("--output", "-o", default="baseline-profile.json")
     profile.add_argument("--min-sessions", type=int, default=3)
     profile.add_argument("--quiet", "-q", action="store_true")
+
+    drift = sub.add_parser(
+        "baseline-drift",
+        help="suggest baseline profile updates from newer benign sessions")
+    drift.add_argument("profile", help="existing baseline profile JSON")
+    drift.add_argument("inputs", nargs="+", help="JSONL files of newer benign sessions")
+    drift.add_argument("--output", "-o", help="write suggestions here instead of stdout")
+    drift.add_argument("--min-support", type=int, default=2,
+                       help="sessions that must agree before a suggestion is made (default: 2)")
+    drift.add_argument("--quiet", "-q", action="store_true")
 
     doctor = sub.add_parser("doctor", help="check environment, telemetry sources and configuration")
     doctor.add_argument("--input", help="optional JSONL file to validate")
@@ -233,6 +260,12 @@ def _cmd_analyze(args) -> int:
     if args.sign:
         key = _key_from_env(args.seal_key_env)
         report = seal_report(report, key)
+    if args.explain_score:
+        explanation = explain_score(report, config)
+        if args.format in (None, "json"):
+            report["score_explanation"] = explanation
+        else:
+            sys.stderr.write(render_score_explanation(explanation))
     return _emit(report, args)
 
 
@@ -269,6 +302,31 @@ def _cmd_timeline(args) -> int:
         sys.stdout.write(f"CABID: timeline written to {destination}\n")
     else:
         sys.stdout.write(payload)
+    return 0
+
+
+def _cmd_import_sigma(args) -> int:
+    document = import_sigma(args.input)
+    destination = Path(args.output)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_text(json.dumps(document, indent=2, sort_keys=False) + "\n", encoding="utf-8")
+    if not args.quiet:
+        print(json.dumps(document["provenance"], indent=2, sort_keys=True))
+    return 0
+
+
+def _cmd_export_stix(args) -> int:
+    try:
+        report = json.loads(Path(args.report).read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"{args.report}: invalid JSON: {exc}") from exc
+    destination = write_bundle(report, args.output, args.host, args.report)
+    if not args.quiet:
+        bundle = build_bundle(report, args.host, args.report)
+        kinds: dict[str, int] = {}
+        for item in bundle["objects"]:
+            kinds[item["type"]] = kinds.get(item["type"], 0) + 1
+        print(f"CABID: wrote {destination} ({', '.join(f'{k}={v}' for k, v in sorted(kinds.items()))})")
     return 0
 
 
@@ -452,6 +510,30 @@ def _cmd_build_baseline(args) -> int:
     return 0
 
 
+def _cmd_baseline_drift(args) -> int:
+    profile = load_profile(args.profile)
+    sessions = []
+    for path in args.inputs:
+        events = read_jsonl(path)
+        if not events:
+            raise ValueError(f"{path}: no events found")
+        sessions.append((Path(path).stem, events))
+    result = drift_suggestions(profile, sessions, min_support=args.min_support)
+    payload = json.dumps(result, indent=2, sort_keys=True) + "\n"
+    if args.output:
+        destination = Path(args.output)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_text(payload, encoding="utf-8")
+        if not args.quiet:
+            sys.stdout.write(
+                f"CABID: {result['suggestion_count']} baseline suggestion(s) from "
+                f"{result['sessions_evaluated']} session(s) written to {destination} "
+                "(profile unchanged)\n")
+    elif not args.quiet:
+        sys.stdout.write(payload)
+    return 0
+
+
 def _cmd_init_config(args) -> int:
     destination = Path(args.output)
     if destination.exists() and not args.force:
@@ -466,6 +548,10 @@ def _cmd_init_config(args) -> int:
 def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
+    if not getattr(args, "command", None):
+        # Running `cabid` with no subcommand is a request for help, not an error.
+        parser.print_help()
+        return 0
     try:
         if args.command == "collect-proc":
             count = collect_to_jsonl(args.output, args.interval, args.duration)
@@ -504,6 +590,10 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_timeline(args)
         if args.command == "seal":
             return _cmd_seal(args)
+        if args.command == "import-sigma":
+            return _cmd_import_sigma(args)
+        if args.command == "export-stix":
+            return _cmd_export_stix(args)
         if args.command == "watch":
             return _cmd_watch(args)
         if args.command == "dashboard":
@@ -523,11 +613,13 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_doctor(args)
         if args.command == "build-baseline":
             return _cmd_build_baseline(args)
+        if args.command == "baseline-drift":
+            return _cmd_baseline_drift(args)
         if args.command == "init-config":
             return _cmd_init_config(args)
         raise ValueError(f"unknown command: {args.command}")
     except (OSError, EventError, ConfigError, PolicyError, HistoryError, IngestError,
-            FilterError, RuleError, SealError, json.JSONDecodeError, ValueError) as exc:
+            FilterError, RuleError, SealError, SigmaError, json.JSONDecodeError, ValueError) as exc:
         return _fail(str(exc))
 
 

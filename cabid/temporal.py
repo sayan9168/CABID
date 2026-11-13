@@ -2,6 +2,8 @@
 from collections import Counter
 from statistics import pstdev
 
+from .normalize import CORE_EVENT_TYPES
+
 
 def temporal_features(events: list[dict]) -> dict:
     if not events:
@@ -12,7 +14,9 @@ def temporal_features(events: list[dict]) -> dict:
     mean_gap = sum(gaps) / len(gaps) if gaps else 0.0
     burstiness = pstdev(gaps) / mean_gap if len(gaps) > 1 and mean_gap > 0 else 0.0
     counts = Counter(e["event_type"] for e in events)
-    diversity = len(counts) / 6.0
+    # Diversity is measured against the core classes so optional auditd classes
+    # cannot push the ratio above 1.0 or change the meaning between sensor types.
+    diversity = len(set(counts) & CORE_EVENT_TYPES) / float(len(CORE_EVENT_TYPES))
     return {"event_count": len(events), "rate_per_minute": len(events) * 60.0 / max(duration, 1.0),
             "burstiness": burstiness, "type_diversity": diversity,
             "event_type_counts": dict(sorted(counts.items()))}

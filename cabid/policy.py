@@ -172,7 +172,8 @@ def evaluate_policy(events: list[dict], policy: dict | None = None,
 
     rule_counts: dict[str, int] = {}
     for finding in findings:
-        rule_counts[finding["rule"]] = rule_counts.get(finding["rule"], 0) + 1
+        rule_name = str(finding.get("rule") or "")
+        rule_counts[rule_name] = rule_counts.get(rule_name, 0) + 1
     return {
         "policy_applied": policy is not None,
         "finding_count": len(findings),

@@ -5,11 +5,36 @@ from collections import defaultdict
 
 _EVENT_RE = re.compile(r"msg=audit\((\d+(?:\.\d+)?):(\d+)\)")
 _KV_RE = re.compile(r'([A-Za-z_][A-Za-z0-9_]*)=("[^"]*"|[^\s]+)')
-_WRITE_MASK = 0x1 | 0x2 | 0x40 | 0x200 | 0x400
 _SYSCALLS = {
-    "c000003e": {2:"open",41:"socket",42:"connect",56:"clone",57:"fork",58:"vfork",59:"execve",60:"exit",82:"rename",83:"mkdir",85:"creat",87:"unlink",231:"exit_group",257:"openat",263:"unlinkat",316:"renameat",322:"execveat"},
-    "c00000b7": {56:"openat",198:"socket",203:"connect",220:"clone",221:"execve",93:"exit",94:"exit_group",276:"renameat",278:"mkdirat",35:"unlinkat",281:"execveat",437:"openat2"},
+    "c000003e": {
+        2: "open", 41: "socket", 42: "connect", 56: "clone", 57: "fork", 58: "vfork",
+        59: "execve", 60: "exit", 82: "rename", 83: "mkdir", 85: "creat", 87: "unlink",
+        90: "chmod", 92: "chown", 101: "ptrace", 105: "setuid", 106: "setgid",
+        113: "setreuid", 114: "setregid", 117: "setresuid", 119: "setresgid",
+        133: "mknod", 155: "pivot_root", 165: "mount", 166: "umount2",
+        231: "exit_group", 257: "openat", 263: "unlinkat", 264: "renameat",
+        268: "fchmodat", 260: "fchownat", 288: "accept4", 316: "renameat2",
+        322: "execveat", 258: "mkdirat",
+    },
+    "c00000b7": {
+        35: "unlinkat", 38: "renameat", 49: "chown", 52: "fchownat", 53: "fchmodat",
+        54: "fchownat2", 56: "openat", 93: "exit", 94: "exit_group", 117: "ptrace",
+        146: "setuid", 144: "setgid", 147: "setresuid", 149: "setresgid",
+        162: "mount", 163: "umount2", 40: "pivot_root", 33: "mknodat",
+        198: "socket", 203: "connect", 220: "clone", 221: "execve", 242: "accept4",
+        276: "renameat", 437: "openat2", 281: "execveat",
+    },
 }
+
+# Syscalls that change privilege or kernel state. Emitted as their own event class
+# so a single record can be correlated without guessing intent.
+_PRIVILEGE_SYSCALLS = {
+    "setuid", "setgid", "setreuid", "setregid", "setresuid", "setresgid",
+}
+_KERNEL_STATE_SYSCALLS = {"ptrace", "mount", "umount2", "pivot_root", "mknod", "mknodat"}
+_PERMISSION_SYSCALLS = {"chmod", "chown", "fchmodat", "fchownat", "fchownat2"}
+_SOCKET_ACCEPT = {"accept4"}
+_WRITE_MASK = 0x1 | 0x2 | 0x40 | 0x200 | 0x400
 
 
 def _fields(line: str) -> dict[str, str]:
@@ -67,15 +92,33 @@ def parse_audit_raw(lines: list[str]) -> dict:
         grouped[f"{timestamp}:{serial}"].append((record_match.group(1), _fields(line)))
 
     events, ignored = [], 0
+    # Why a record produced no event. A single opaque "ignored" count hides the
+    # difference between "not interesting" and "not understood".
+    skip_reasons: dict[str, int] = {}
+
+    def _skip(reason: str) -> None:
+        skip_reasons[reason] = skip_reasons.get(reason, 0) + 1
     for event_id, records in sorted(grouped.items(), key=lambda item: float(item[0].split(":", 1)[0])):
         syscall = next((f for kind, f in records if kind == "SYSCALL"), None)
-        if syscall is None or syscall.get("success", "yes") not in {"yes", "1"}:
+        if syscall is None:
             ignored += 1
+            _skip("no_syscall_record")
+            continue
+        if syscall.get("success", "yes") not in {"yes", "1"}:
+            ignored += 1
+            _skip("failed_syscall")
             continue
         name = _syscall_name(syscall)
+        raw_number = syscall.get("syscall", "")
+        if not name and raw_number.isdigit():
+            if syscall.get("arch", "").lower() not in _SYSCALLS:
+                ignored += 1
+                _skip("unsupported_arch")
+                continue
         pid, ppid = _number(syscall.get("pid")), _number(syscall.get("ppid")) or 0
         if not pid or pid < 1:
             ignored += 1
+            _skip("missing_pid")
             continue
         paths = [f.get("name", "") for kind, f in records if kind == "PATH" and f.get("name")]
         base = {"timestamp": float(event_id.split(":", 1)[0]), "process_id": pid,
@@ -99,13 +142,35 @@ def parse_audit_raw(lines: list[str]) -> dict:
             kind, target = "file_write", (paths[0] if paths else "")
         elif name in {"exit", "exit_group"}:
             kind = "process_exit"
+        elif name in _PRIVILEGE_SYSCALLS:
+            kind, target = "privilege_change", name
+        elif name in _KERNEL_STATE_SYSCALLS:
+            kind, target = "kernel_state_change", name
+        elif name in _PERMISSION_SYSCALLS:
+            kind, target = "permission_change", (paths[0] if paths else name)
+        elif name in _SOCKET_ACCEPT:
+            kind = "network_accept"
         if kind is None:
             ignored += 1
+            _skip("unmapped_syscall" if raw_number.isdigit() else "unmapped_syscall_name")
         else:
             events.append({**base, "event_type": kind, "target": target})
     return {"events": events, "records_seen": len(lines), "audit_events_seen": len(grouped),
             "events_emitted": len(events), "records_unparsed": unparsed, "audit_events_ignored": ignored,
+            "event_type_counts": _count_types(events),
+            "skipped": dict(sorted(skip_reasons.items())),
             "limitations": ["Only selected x86_64 and aarch64 syscall families are translated.",
                 "File-write extraction depends on syscall arguments and PATH records.",
+                "privilege_change records a successful setuid-family call, not why it was made.",
+                "kernel_state_change covers ptrace/mount/umount2/pivot_root/mknod only.",
                 "Missing records do not prove that activity did not occur.",
+                "'skipped' explains why each ignored record produced no event; a large "
+                "unmapped_syscall count means the stream is only partly understood, not that it is calm.",
                 "Audit rules are configured separately; this parser never changes system policy."]}
+
+
+def _count_types(events: list[dict]) -> dict[str, int]:
+    counts: dict[str, int] = defaultdict(int)
+    for event in events:
+        counts[event["event_type"]] += 1
+    return dict(sorted(counts.items()))

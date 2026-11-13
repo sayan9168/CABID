@@ -10,7 +10,7 @@ import copy
 import json
 from pathlib import Path
 
-from .normalize import ALLOWED
+from .normalize import ALLOWED, CORE_EVENT_TYPES
 
 CONFIG_FORMAT = "cabid-config/1"
 
@@ -30,7 +30,10 @@ DEFAULT_CONFIG: dict = {
         "burstiness": 3.0,
     },
     "completeness": {
-        "expected_event_types": sorted(ALLOWED),
+        # Only classes a generic sensor can produce. Auditd-only classes are
+        # accepted on input but never required, or a procfs stream would always
+        # look insufficient. See cabid/completeness.py.
+        "expected_event_types": sorted(CORE_EVENT_TYPES),
         "minimum_ratio": 1.0,
     },
     "sequence": {

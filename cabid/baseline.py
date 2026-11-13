@@ -138,7 +138,7 @@ def novelty_features(events: list[dict], profile: dict | None = None) -> dict:
 
     executables = profile.get("executables") or {}
     known_names = set(executables)
-    observations = {}
+    observations: dict[str, set[str]] = {}
     for event in events:
         name = str(event.get("process_name") or "unknown")
         executable = str(event.get("executable") or "").strip()
@@ -177,3 +177,81 @@ def _mix_novelty(events: list[dict], baseline: dict[str, float]) -> float:
     for kind in sorted(set(baseline) | set(observed)):
         total += abs(float(baseline.get(kind, 0.0)) - float(observed.get(kind, 0.0)))
     return min(1.0, total / 2.0)
+
+
+def drift_suggestions(profile: dict, sessions: list[tuple[str, list[dict]]],
+                      min_support: int = 2, max_suggestions: int = 25) -> dict:
+    """Suggest profile updates from newer benign sessions.
+
+    Baseline rot is silent: a package upgrade adds an executable, the profile goes
+    stale, and benign activity starts scoring as novel. This produces a *diff*
+    for the operator to review — it never rewrites the profile. A suggestion is
+    only made when at least ``min_support`` sessions agree, so one odd but benign
+    session cannot widen the baseline on its own.
+    """
+    if not isinstance(profile, dict):
+        raise ValueError("a baseline profile object is required")
+    known = {str(name): set(values or []) for name, values in (profile.get("executables") or {}).items()}
+    seen_names: dict[str, set[str]] = {}
+    seen_edges: dict[tuple[str, str], int] = {}
+    edge_support: dict[tuple[str, str], set[str]] = {}
+    support: dict[str, set[str]] = {}
+    for session_name, events in sessions:
+        names = {}
+        local: dict[str, set[str]] = {}
+        for event in events:
+            name = str(event.get("process_name") or "unknown")
+            if name == "unknown":
+                continue
+            local.setdefault(name, set())
+            executable = str(event.get("executable") or "").strip()
+            if executable:
+                local[name].add(executable)
+            names[event["process_id"]] = name
+        for name, executables in local.items():
+            seen_names.setdefault(name, set()).update(executables)
+            support.setdefault(name, set()).add(str(session_name))
+        for event in events:
+            parent = names.get(event.get("parent_process_id") or -1)
+            child = names.get(event["process_id"])
+            if parent and child and parent != child:
+                edge = (parent, child)
+                seen_edges[edge] = seen_edges.get(edge, 0) + 1
+                edge_support.setdefault(edge, set()).add(str(session_name))
+
+    known_edges = {tuple(edge) for edge in (profile.get("parent_child") or [])}
+    new_processes, new_executables = [], []
+    for name, executables in sorted(seen_names.items()):
+        if len(support.get(name, ())) < min_support:
+            continue
+        if name not in known:
+            new_processes.append({"process_name": name, "executables": sorted(executables)[:10],
+                                  "sessions": len(support.get(name, ()))})
+            continue
+        added = sorted(executables - known[name])
+        if added:
+            new_executables.append({"process_name": name, "new_executables": added[:10],
+                                    "sessions": len(support.get(name, ()))})
+    new_edges = [
+        {"parent": parent, "child": child, "occurrences": count,
+         "sessions": len(edge_support.get((parent, child), ()))}
+        for (parent, child), count in sorted(seen_edges.items())
+        if (parent, child) not in known_edges
+        and len(edge_support.get((parent, child), ())) >= min_support
+    ]
+    suggestions = new_processes + new_executables + new_edges
+    return {
+        "profile_format": profile.get("format"),
+        "sessions_evaluated": len(sessions),
+        "min_support": min_support,
+        "suggestion_count": len(suggestions),
+        "new_processes": new_processes[:max_suggestions],
+        "new_executables": new_executables[:max_suggestions],
+        "new_parent_child_edges": new_edges[:max_suggestions],
+        "applied": False,
+        "notes": [
+            "Suggestions only; the profile is never modified automatically.",
+            "A suggestion needs support from at least the minimum number of sessions.",
+            "Review a suggestion before widening the baseline: drift and compromise look identical in a diff.",
+        ],
+    }

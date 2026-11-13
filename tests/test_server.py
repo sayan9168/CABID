@@ -146,3 +146,35 @@ def test_bad_time_range_and_dataset_list_are_422(live_server):
                 {"events": [], "since": "2030-01-01", "until": "2020-01-01"})[0] == 422
     assert call(live_server + "/api/analyze", "POST", {"datasets": []})[0] == 422
     assert call(live_server + "/api/analyze", "POST", {"datasets": ["../pyproject.toml"]})[0] in {400, 404, 422}
+
+
+def test_dashboard_exposes_the_scope_pane(live_server):
+    """The containers block must be reachable in the UI, not only in JSON."""
+    import urllib.request
+
+    page = urllib.request.urlopen(live_server + "/").read().decode("utf-8")
+    assert 'data-tab="containers"' in page
+    assert "report.containers" in page
+    # The pane must carry the "collisions are expected" caveat, not just a count.
+    assert "expected, not suspicious" in page
+
+
+def test_analyze_endpoint_returns_scope_information(live_server):
+    import json
+    import urllib.request
+
+    rows = [
+        {"timestamp": 1, "event_type": "process_start", "process_id": 1,
+         "parent_process_id": 0, "process_name": "nginx", "container_id": "abc123"},
+        {"timestamp": 2, "event_type": "process_start", "process_id": 42,
+         "parent_process_id": 1, "process_name": "php", "container_id": "abc123"},
+        {"timestamp": 3, "event_type": "process_start", "process_id": 42,
+         "parent_process_id": 0, "process_name": "java", "container_id": "def456"},
+    ]
+    body = json.dumps({"events": rows}).encode()
+    request = urllib.request.Request(live_server + "/api/analyze", data=body,
+                                    headers={"Content-Type": "application/json"})
+    report = json.load(urllib.request.urlopen(request))
+    assert report["containers"]["container_aware"] is True
+    assert report["containers"]["scope_count"] == 2
+    assert report["containers"]["collision_count"] == 1

@@ -32,11 +32,11 @@ _ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{1,63}$")
 
 _STEP_KEYS = {
     "event_type", "process_name", "executable", "target", "same_process",
-    "within", "min_events",
+    "parent_executable", "within", "min_events",
 }
 _RULE_KEYS = {"id", "title", "description", "severity", "kind", "steps", "filter",
               "window", "min_count", "max_matches", "mitre", "enabled"}
-_RULE_FILE_KEYS = {"$schema", "format", "name", "description", "rules"}
+_RULE_FILE_KEYS = {"$schema", "format", "name", "description", "rules", "provenance"}
 
 
 class RuleError(ValueError):
@@ -64,7 +64,7 @@ def _validate_filter(raw: dict, where: str, allowed: set[str]) -> dict:
         if bad:
             raise RuleError(f"{where}.event_type: unsupported: {', '.join(bad)}")
         raw["event_type"] = types
-    for field in ("process_name", "executable", "target"):
+    for field in ("process_name", "executable", "target", "parent_executable"):
         if field in raw:
             raw[field] = _string_list(raw[field], f"{where}.{field}")
     if "within" in raw:
@@ -94,7 +94,7 @@ def _validate_rule(raw: dict, index: int) -> dict:
     rule_id = raw.get("id")
     if not isinstance(rule_id, str) or not _ID_RE.match(rule_id):
         raise RuleError(f"rule {index}: id must match [a-z0-9][a-z0-9_-]{{1,63}}")
-    rule = {"id": rule_id}
+    rule: dict = {"id": rule_id}
     rule["title"] = str(raw.get("title") or rule_id.replace("-", " ").replace("_", " ")).strip()
     if not rule["title"]:
         raise RuleError(f"rule {rule_id}: title must not be empty")
@@ -170,6 +170,14 @@ def load_rules(path: str | Path | None) -> list[dict]:
 
 
 def load_rules_from_dict(raw: dict, origin: str = "builtin") -> list[dict]:
+    """Validate a rule document.
+
+    A ``provenance`` block is carried through for imported rule packs (Sigma
+    translation, vendor packs) and validated only for being an object; it has no
+    effect on evaluation.
+    """
+    if "provenance" in raw and not isinstance(raw["provenance"], dict):
+        raise RuleError(f"{origin}: provenance must be an object")
     rules = raw.get("rules")
     if not isinstance(rules, list) or not rules:
         raise RuleError(f"{origin}: 'rules' must be a non-empty list")
@@ -193,7 +201,22 @@ def _glob_any(value: str, patterns: list[str]) -> bool:
     return False
 
 
-def _matches(event: dict, step: dict) -> bool:
+def _parent_labels(event: dict, by_pid: dict[int, dict]) -> list[str]:
+    """Name and executable of the parent process, as far as this stream can tell.
+
+    Looks up the parent's own event; a parent missing from the window matches
+    nothing, so a rule can never fire on an unobserved parent. Both the name and
+    the executable are offered because a translated Sigma rule may glob either.
+    """
+    parent_id = event.get("parent_process_id")
+    parent = by_pid.get(parent_id) if isinstance(parent_id, int) else None
+    if not parent:
+        return []
+    labels = [str(parent.get("process_name") or ""), str(parent.get("executable") or "")]
+    return [label for label in labels if label]
+
+
+def _matches(event: dict, step: dict, by_pid: dict[int, dict] | None = None) -> bool:
     if "event_type" in step and event["event_type"] not in step["event_type"]:
         return False
     if "process_name" in step and not _glob_any(str(event.get("process_name") or ""),
@@ -204,6 +227,10 @@ def _matches(event: dict, step: dict) -> bool:
         return False
     if "target" in step and not _glob_any(str(event.get("target") or ""), step["target"]):
         return False
+    if "parent_executable" in step:
+        labels = _parent_labels(event, by_pid or {})
+        if not any(_glob_any(label, step["parent_executable"]) for label in labels):
+            return False
     return True
 
 
@@ -222,11 +249,12 @@ def _evidence(events: list[dict], indices: list[int]) -> list[dict]:
     return evidence
 
 
-def _match_sequence(events: list[dict], rule: dict) -> list[dict]:
+def _match_sequence(events: list[dict], rule: dict,
+                    by_pid: dict[int, dict] | None = None) -> list[dict]:
     steps = rule["steps"]
-    matches = []
+    matches: list[dict] = []
     for start in range(len(events)):
-        if not _matches(events[start], steps[0]):
+        if not _matches(events[start], steps[0], by_pid):
             continue
         anchor_pid = events[start]["process_id"]
         indices = [start]
@@ -243,7 +271,7 @@ def _match_sequence(events: list[dict], rule: dict) -> list[dict]:
                 if step.get("same_process") and candidate["process_id"] != anchor_pid:
                     cursor += 1
                     continue
-                if _matches(candidate, step):
+                if _matches(candidate, step, by_pid):
                     found = cursor
                     break
                 cursor += 1
@@ -270,12 +298,13 @@ def _match_sequence(events: list[dict], rule: dict) -> list[dict]:
             "process_ids": sorted({events[index]["process_id"] for index in indices}),
             "evidence": _evidence(events, indices),
         })
-        if len(matches) >= rule["max_matches"]:
+        if len(matches) >= rule.get("max_matches", MAX_MATCHES_PER_RULE):
             break
     return matches
 
 
-def _match_count(events: list[dict], rule: dict) -> list[dict]:
+def _match_count(events: list[dict], rule: dict,
+                 by_pid: dict[int, dict] | None = None) -> list[dict]:
     """Report one finding per burst, not per event inside a burst.
 
     A burst is a maximal run of matching events in which consecutive matches are
@@ -286,7 +315,8 @@ def _match_count(events: list[dict], rule: dict) -> list[dict]:
     filter_step = rule["filter"]
     window = rule["window"]
     needed = rule["min_count"]
-    matching = [index for index, event in enumerate(events) if _matches(event, filter_step)]
+    matching = [index for index, event in enumerate(events)
+                if _matches(event, filter_step, by_pid)]
     bursts: list[list[int]] = []
     for index in matching:
         if bursts and float(events[index]["timestamp"]) - float(
@@ -294,7 +324,7 @@ def _match_count(events: list[dict], rule: dict) -> list[dict]:
             bursts[-1].append(index)
         else:
             bursts.append([index])
-    matches = []
+    matches: list[dict] = []
     for bucket in bursts:
         if len(bucket) < needed:
             continue
@@ -312,7 +342,7 @@ def _match_count(events: list[dict], rule: dict) -> list[dict]:
             "process_ids": sorted({events[i]["process_id"] for i in bucket}),
             "evidence": _evidence(events, bucket),
         })
-        if len(matches) >= rule["max_matches"]:
+        if len(matches) >= rule.get("max_matches", MAX_MATCHES_PER_RULE):
             break
     return matches
 
@@ -320,13 +350,17 @@ def _match_count(events: list[dict], rule: dict) -> list[dict]:
 def evaluate_rules(events: list[dict], rules: list[dict]) -> dict:
     """Evaluate every enabled rule against timestamp-sorted events."""
     ordered = sorted(events, key=lambda item: (float(item["timestamp"]), item["process_id"]))
+    # Parent lookups for steps that constrain the parent process.
+    by_pid: dict[int, dict] = {}
+    for event in ordered:
+        by_pid.setdefault(event["process_id"], event)
     findings = []
     per_rule = []
     for rule in rules:
         if rule["kind"] == "sequence":
-            matches = _match_sequence(ordered, rule)
+            matches = _match_sequence(ordered, rule, by_pid)
         else:
-            matches = _match_count(ordered, rule)
+            matches = _match_count(ordered, rule, by_pid)
         per_rule.append({"rule_id": rule["id"], "kind": rule["kind"], "matches": len(matches),
                          "enabled": True, "severity": rule["severity"]})
         findings.extend(matches)
@@ -402,6 +436,77 @@ BUILTIN_RULES: list[dict] = [
         "filter": {"event_type": "process_start"},
         "window": 10,
         "min_count": 12,
+    },
+    {
+        "id": "privilege-escalation-to-exec",
+        "title": "Privilege change followed by execution",
+        "description": "A successful setuid-family call was followed by executing a binary from a "
+                       "writable path. Legitimate sudo use usually execs from /usr or /bin.",
+        "severity": "critical",
+        "mitre": "hint: T1548 abuse elevation control mechanism",
+        "steps": [
+            {"event_type": "privilege_change"},
+            {"event_type": "process_exec",
+             "executable": ["/tmp/*", "/var/tmp/*", "/dev/shm/*", "/home/*"],
+             "within": 60},
+        ],
+    },
+    {
+        "id": "ptrace-then-credential-read",
+        "title": "ptrace followed by credential file access",
+        "description": "A traced-attach call preceded a write-capable open of a credential file. "
+                       "Debuggers and some profilers produce the first step legitimately.",
+        "severity": "critical",
+        "mitre": "hint: T1003 OS credential dumping",
+        "steps": [
+            {"event_type": "kernel_state_change", "target": ["ptrace*"]},
+            {"event_type": ["file_write", "permission_change"],
+             "target": ["/etc/shadow", "/etc/gshadow", "*id_rsa*", "*/secrets*"],
+             "within": 120},
+        ],
+    },
+    {
+        "id": "permission-relaxed-on-credential",
+        "title": "Permissions changed on a credential file",
+        "description": "A chmod/chown call targeted a credential path. Commonly misconfiguration, "
+                       "occasionally preparation for exfiltration.",
+        "severity": "high",
+        "steps": [
+            # The chmod that causes a permission_change is logged *before* it, so
+            # the exec has to come first or this rule can never match.
+            {"event_type": "process_exec",
+             "executable": ["/bin/chmod", "/usr/bin/chmod", "/bin/chown", "/usr/bin/chown",
+                            "/usr/bin/setfacl", "/bin/chattr", "/usr/bin/chattr"]},
+            {"event_type": "permission_change",
+             "target": ["/etc/shadow", "/etc/gshadow", "/etc/sudoers", "*/id_rsa*"],
+             "within": 30},
+        ],
+    },
+    {
+        "id": "kernel-state-then-persistence",
+        "title": "Kernel state change followed by persistence write",
+        "description": "mount/umount2/ptrace was followed by a write to a startup or cron path.",
+        "severity": "critical",
+        "mitre": "hint: T1543 create or modify system process",
+        "steps": [
+            {"event_type": "kernel_state_change",
+             "target": ["mount*", "ptrace*", "pivot_root*", "umount2*"]},
+            {"event_type": "file_write",
+             "target": ["/etc/cron*", "/etc/rc.local", "/etc/systemd/system/*",
+                        "/etc/ld.so.preload", "/var/spool/cron/*"],
+             "within": 300},
+        ],
+    },
+    {
+        "id": "bulk-accept-then-exec",
+        "title": "Burst of inbound connections before execution",
+        "description": "Many accepts followed by a new process may indicate exploitation of a "
+                       "network service; it also matches ordinary request bursts.",
+        "severity": "medium",
+        "kind": "count",
+        "filter": {"event_type": "network_accept"},
+        "window": 30,
+        "min_count": 20,
     },
     {
         "id": "exit-then-activity",
