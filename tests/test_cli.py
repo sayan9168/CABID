@@ -81,3 +81,69 @@ def test_watch_cli_bounded_iterations(tmp_path, capsys):
                       encoding="utf-8")
     assert main(["watch", str(stream), "--iterations", "1", "--interval", "0", "--json"]) == 0
     assert json.loads(capsys.readouterr().out.splitlines()[0])["status"] == "INSUFFICIENT_EVIDENCE"
+
+
+def test_analyze_merges_multiple_inputs_with_provenance(tmp_path):
+    output = tmp_path / "merged.json"
+    assert main(["analyze", "datasets/synthetic/example.jsonl",
+                 "datasets/synthetic/suspicious-example.jsonl", "-o", str(output), "-q"]) == 0
+    report = json.loads(output.read_text(encoding="utf-8"))
+    assert report["sources"]["source_count"] == 2
+    assert report["sources"]["events_total"] == 78
+    assert report["event_count"] == 78
+
+
+def test_analyze_time_filter_and_empty_result(tmp_path):
+    output = tmp_path / "filtered.json"
+    assert main(["analyze", "datasets/synthetic/example.jsonl",
+                 "--since", "2025-10-09T00:00:00Z", "--until", "2025-10-09T23:59:59Z",
+                 "-o", str(output), "-q"]) == 0
+    report = json.loads(output.read_text(encoding="utf-8"))
+    assert report["time_filter"]["active"] is True
+    assert report["time_filter"]["events_out"] == 6
+
+    empty = tmp_path / "empty.json"
+    assert main(["analyze", "datasets/synthetic/example.jsonl", "--since", "2100-01-01T00:00:00Z",
+                 "-o", str(empty), "-q"]) == 0
+    assert json.loads(empty.read_text(encoding="utf-8"))["status"] == "INSUFFICIENT_EVIDENCE"
+
+
+def test_invalid_time_range_is_an_error(tmp_path, capsys):
+    assert main(["analyze", "datasets/synthetic/example.jsonl", "--since", "2030-01-01",
+                 "--until", "2020-01-01"]) == 2
+    assert "earlier" in capsys.readouterr().err
+
+
+def test_history_round_trip(tmp_path, capsys):
+    db = tmp_path / "history.sqlite3"
+    fixture = "datasets/synthetic/example.jsonl"
+    assert main(["analyze", fixture, "--history-db", str(db), "--save-history",
+                 "--label", "first", "-o", str(tmp_path / "r.json"), "-q"]) == 0
+    assert main(["analyze", "datasets/synthetic/suspicious-example.jsonl",
+                 "--history-db", str(db), "--save-history", "--label", "second",
+                 "-o", str(tmp_path / "r2.json"), "-q"]) == 0
+    capsys.readouterr()
+    assert main(["history", "--db", str(db), "--format", "json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert [run["label"] for run in payload["runs"]] == ["second", "first"]
+
+    assert main(["history", "--db", str(db), "--compare", "1", "2", "--format", "json"]) == 0
+    comparison = json.loads(capsys.readouterr().out)["comparison"]
+    assert comparison["status_changed"] is True
+    assert comparison["score_delta"] > 0
+
+    report = tmp_path / "cmp.json"
+    assert main(["analyze", "datasets/synthetic/suspicious-example.jsonl",
+                 "--history-db", str(db), "--compare-history", "1", "-o", str(report), "-q"]) == 0
+    assert json.loads(report.read_text(encoding="utf-8"))["history_comparison"]["status_changed"] is True
+
+
+def test_history_with_no_records(tmp_path, capsys):
+    assert main(["history", "--db", str(tmp_path / "none.sqlite3")]) == 0
+    assert "No runs recorded" in capsys.readouterr().out
+
+
+def test_report_contains_entity_rollup(tmp_path):
+    output = tmp_path / "rollup.md"
+    assert main(["analyze", "datasets/synthetic/suspicious-example.jsonl", "-o", str(output), "-q"]) == 0
+    assert "Process rollup" in output.read_text(encoding="utf-8")

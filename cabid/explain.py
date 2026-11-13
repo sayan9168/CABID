@@ -30,6 +30,8 @@ _RULE_HELP = {
     "windowed_anomaly": "At least one time window inside the stream crossed a risk threshold.",
     "sensitive_path_write": "An event touched a path pattern declared sensitive by operator policy.",
     "sensitive_port_connect": "A connection targeted a port declared sensitive by operator policy.",
+    "entity_risk": "A process showed behaviour inconsistent with the observed baseline.",
+    "history_regression": "This run scored materially higher than the compared history run.",
 }
 
 
@@ -140,6 +142,56 @@ def render_markdown(report: dict) -> str:
             lines.append(f"| {item['from']} → {item['to']} | {item['count']} |")
         lines.append("")
 
+    entities = report.get("entities") or {}
+    if entities.get("top_entities"):
+        lines += ["## Process rollup", "",
+                  f"- Processes observed: {entities.get('entity_count', 0)}",
+                  f"- Processes with any risk signal: {entities.get('flagged_entity_count', 0)}",
+                  f"- _{entities.get('ranking_semantics', '')}_", "",
+                  "| PID | Process | Events | Risk | Contradictions | Sensitive hits |",
+                  "| --- | --- | --- | --- | --- | --- |"]
+        for entity in entities["top_entities"][:10]:
+            names = ", ".join(entity["process_names"])
+            lines.append(
+                f"| {entity['process_id']} | {names} | {entity['event_count']} | "
+                f"{entity['entity_risk']:.3f} | {entity['contradiction_events']} | {entity['sensitive_hits']} |")
+        lines.append("")
+
+    sources = report.get("sources")
+    if sources and sources.get("sources"):
+        lines += ["## Sources", "",
+                  f"- Files merged: {sources.get('source_count', 0)}",
+                  f"- Events: {sources.get('events_total', 0)} (duplicates by fingerprint: "
+                  f"{sources.get('duplicate_events', 0)})", ""]
+        lines += ["| Source | Events | First | Last |", "| --- | --- | --- | --- |"]
+        for item in sources["sources"]:
+            lines.append(f"| `{item['source']}` | {item['events']} | {item['first_timestamp']} | "
+                         f"{item['last_timestamp']} |")
+        lines.append("")
+        if sources.get("overlapping_sources"):
+            lines.append(f"**Overlapping time ranges:** {len(sources['overlapping_sources'])} pair(s); "
+                         "activity may be double counted.")
+            lines.append("")
+
+    window_filter = report.get("time_filter") or {}
+    if window_filter.get("active"):
+        lines += ["## Time filter", "",
+                  f"- Kept {window_filter.get('events_out', 0)} of {window_filter.get('events_in', 0)} events "
+                  f"({window_filter.get('events_removed', 0)} removed)",
+                  f"- From: {window_filter.get('since_iso') or 'start'}  ",
+                  f"- To: {window_filter.get('until_iso') or 'end'}", ""]
+
+    comparison = report.get("history_comparison") or {}
+    if comparison:
+        baseline = comparison.get("baseline_run") or {}
+        lines += ["## History comparison", "",
+                  f"- Compared against run {baseline.get('id')} ({baseline.get('label')}, "
+                  f"{baseline.get('created_at')})",
+                  f"- Score delta: {comparison.get('score_delta', 0.0):+.3f}",
+                  f"- Status changed: {'yes' if comparison.get('status_changed') else 'no'}",
+                  f"- New reason codes: {', '.join(comparison.get('new_reason_codes') or []) or 'none'}",
+                  f"- Cleared reason codes: {', '.join(comparison.get('cleared_reason_codes') or []) or 'none'}", ""]
+
     policy = report.get("policy") or {}
     if policy.get("policy_applied") or policy.get("finding_count"):
         lines += ["## Policy findings", "",
@@ -209,6 +261,16 @@ def render_csv(report: dict) -> str:
         writer.writerow([
             "policy", status, score, finding.get("rule", ""), finding.get("severity", ""), "", "",
             finding.get("process_name", ""), finding.get("detail", ""), top,
+        ])
+    for entity in (report.get("entities") or {}).get("top_entities") or []:
+        writer.writerow([
+            "entity", status, score, entity.get("entity_risk", ""), "", "", "",
+            f"pid {entity.get('process_id')}", ", ".join(entity.get("process_names") or []), top,
+        ])
+    for source in (report.get("sources") or {}).get("sources") or []:
+        writer.writerow([
+            "source", status, score, source.get("events", ""), "", "", "",
+            source.get("source", ""), f"{source.get('first_timestamp')}..{source.get('last_timestamp')}", top,
         ])
     nested = _windows_of(report)
     if nested is not report and nested is not None:
@@ -387,6 +449,29 @@ def render_html(report: dict, source: str = "events.jsonl") -> str:
                 f"<td>{escape(str(reason.get('detail')))}</td></tr>"
             )
         parts.append("</table></div>")
+    entities = (report.get("entities") or {}).get("top_entities") or []
+    if entities:
+        parts.append('<div class="card"><h2 style="margin-top:0">Process rollup</h2><table>')
+        parts.append("<tr><th>PID</th><th>Process</th><th>Events</th><th>Risk</th>"
+                     "<th>Contradictions</th><th>Sensitive hits</th></tr>")
+        for entity in entities[:10]:
+            parts.append(
+                f"<tr><td>{int(entity['process_id'])}</td>"
+                f"<td>{escape(', '.join(entity['process_names']))}</td>"
+                f"<td>{int(entity['event_count'])}</td>"
+                f"<td>{float(entity['entity_risk']):.3f}</td>"
+                f"<td>{int(entity['contradiction_events'])}</td>"
+                f"<td>{int(entity['sensitive_hits'])}</td></tr>"
+            )
+        parts.append("</table></div>")
+
+    comparison = report.get("history_comparison") or {}
+    if comparison:
+        parts.append('<div class="card"><h2 style="margin-top:0">History comparison</h2>'
+                     f"<p>Score delta <strong>{float(comparison.get('score_delta', 0.0)):+.3f}</strong> "
+                     f"against run {escape(str((comparison.get('baseline_run') or {}).get('id')))}. "
+                     f"New codes: {escape(', '.join(comparison.get('new_reason_codes') or []) or 'none')}</p></div>")
+
     findings = (report.get("policy") or {}).get("findings") or []
     if findings:
         parts.append('<div class="card"><h2 style="margin-top:0">Policy findings</h2><table>')

@@ -8,12 +8,15 @@ from pathlib import Path
 
 from . import __version__
 from .audit import parse_audit_raw
+from .aggregate import IngestError, ingest_sources
 from .baseline import build_profile, load_profile, write_profile
 from .benchmark import run_benchmark
 from .collector import collect_to_jsonl
 from .config import ConfigError, config_template, load_config
 from .detector import analyze, analyze_windows
+from .filters import FilterError, filter_events
 from .explain import FORMATS, render, render_json
+from .history import DEFAULT_DB, HistoryError, compare_runs, list_runs, record_run
 from .ingest import normalize_many, read_jsonl
 from .normalize import EventError
 from .policy import PolicyError, evaluate_policy, load_policy
@@ -37,6 +40,8 @@ def _fmt_from_path(path: str | None, default: str = "json") -> str:
 def _emit(report: dict, args, default_format: str = "json") -> int:
     fmt = getattr(args, "format", None) or _fmt_from_path(getattr(args, "output", None), default_format)
     source = getattr(args, "input", "events.jsonl")
+    if isinstance(source, (list, tuple)):
+        source = ", ".join(str(item) for item in source)
     payload = render(report, fmt, source)
     if getattr(args, "output", None):
         destination = Path(args.output)
@@ -69,8 +74,8 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--version", action="version", version=f"CABID {__version__}")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    run = sub.add_parser("analyze", help="analyze a JSONL event stream")
-    run.add_argument("input")
+    run = sub.add_parser("analyze", help="analyze one or more JSONL event streams")
+    run.add_argument("input", nargs="+", help="JSONL file(s); multiple files are merged")
     run.add_argument("--output", "-o")
     run.add_argument("--format", "-f", choices=FORMATS, help="report format (default: json)")
     run.add_argument("--config", "-c", help="analysis configuration JSON")
@@ -80,6 +85,23 @@ def _build_parser() -> argparse.ArgumentParser:
     run.add_argument("--fail-on", help="exit 1 when status is at or above this severity")
     run.add_argument("--exit-code", action="store_true", help="map status to an exit code (0/1/2)")
     run.add_argument("--quiet", "-q", action="store_true", help="suppress stdout when --output is used")
+    run.add_argument("--since", help="keep events at or after this time (Unix seconds or ISO-8601)")
+    run.add_argument("--until", help="keep events at or before this time (Unix seconds or ISO-8601)")
+    run.add_argument("--history-db", default=DEFAULT_DB, metavar="DB",
+                     help=f"history database path (default: {DEFAULT_DB})")
+    run.add_argument("--save-history", action="store_true",
+                     help="record this run in --history-db")
+    run.add_argument("--label", default="run", help="label for the history record")
+    run.add_argument("--compare-history", type=int, metavar="RUN_ID",
+                     help="diff this run against a stored run id")
+
+    hist = sub.add_parser("history", help="list or inspect recorded runs")
+    hist.add_argument("--db", default=DEFAULT_DB)
+    hist.add_argument("--limit", type=int, default=20)
+    hist.add_argument("--show", type=int, metavar="RUN_ID", help="print the stored summary for a run")
+    hist.add_argument("--compare", nargs=2, type=int, metavar=("RUN_A", "RUN_B"),
+                      help="diff two stored runs")
+    hist.add_argument("--format", "-f", choices=("json", "md"), default="md")
 
     collect = sub.add_parser("collect-proc", help="poll visible Linux process metadata from /proc")
     collect.add_argument("--output", "-o", required=True)
@@ -134,19 +156,116 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _load_analyze_events(args) -> tuple[list[dict], dict]:
+    """Load, merge, and time-filter the analyze inputs."""
+    sources_block = None
+    if len(args.input) > 1:
+        merged = ingest_sources(args.input)
+        events = merged.pop("events")
+        sources_block = merged
+    else:
+        events = read_jsonl(args.input[0])
+    events, window = filter_events(events, getattr(args, "since", None), getattr(args, "until", None))
+    return events, {"sources": sources_block, "time_filter": window}
+
+
 def _cmd_analyze(args) -> int:
     config = load_config(args.config)
     profile = load_profile(args.baseline) if args.baseline else None
-    events = read_jsonl(args.input)
-    report = analyze(events, config, profile)
     policy = load_policy(args.policy)
+    events, metadata = _load_analyze_events(args)
+    report = analyze(events, config, profile, policy)
     evaluation = evaluate_policy(events, policy, report.get("reasons"))
     if evaluation["reasons_after_suppression"]:
         report["reasons"] = evaluation["reasons_after_suppression"]
     report["policy"] = evaluation
+    if metadata["sources"]:
+        report["sources"] = metadata["sources"]
+    report["time_filter"] = metadata["time_filter"]
     if args.window:
-        report["windowed"] = analyze_windows(events, args.window, config, profile)
+        report["windowed"] = analyze_windows(events, args.window, config, profile, policy)
+    if args.compare_history is not None:
+        report["history_comparison"] = compare_runs(report, args.compare_history, args.history_db)
+    if args.save_history:
+        report["history_record"] = {
+            "database": str(args.history_db),
+            "run_id": record_run(report, args.history_db, args.label, ", ".join(args.input)),
+        }
     return _emit(report, args)
+
+
+def _cmd_history(args) -> int:
+    if args.compare:
+        first, second = args.compare
+        connection_report = {"runs": list_runs(args.db, limit=10)}
+        from .history import _connect, _load_row  # local import keeps the module surface small
+
+        connection = _connect(args.db)
+        try:
+            left = _load_row(connection, first)
+            right = _load_row(connection, second)
+        finally:
+            connection.close()
+        payload = {"comparison": _compare_stored(left, right), "context": connection_report}
+        if args.format == "json":
+            sys.stdout.write(render_json(payload) + "\n")
+        else:
+            comparison = payload["comparison"]
+            sys.stdout.write(f"# CABID history comparison\n\n"
+                             f"| Field | Run {first} | Run {second} | Delta |\n| --- | --- | --- | --- |\n"
+                             f"| Status | {comparison['left']['status']} | {comparison['right']['status']} | "
+                             f"{'changed' if comparison['status_changed'] else 'same'} |\n"
+                             f"| Score | {comparison['left']['anomaly_score']:.3f} | "
+                             f"{comparison['right']['anomaly_score']:.3f} | {comparison['score_delta']:+.3f} |\n"
+                             f"| Events | {comparison['left']['event_count']} | "
+                             f"{comparison['right']['event_count']} | "
+                             f"{comparison['right']['event_count'] - comparison['left']['event_count']:+d} |\n\n"
+                             f"- New reason codes: {', '.join(comparison['new_reason_codes']) or 'none'}\n"
+                             f"- Cleared reason codes: {', '.join(comparison['cleared_reason_codes']) or 'none'}\n")
+        return 0
+    if args.show is not None:
+        from .history import _connect, _load_row
+
+        connection = _connect(args.db)
+        try:
+            row = _load_row(connection, args.show)
+        finally:
+            connection.close()
+        sys.stdout.write(render_json(row) + "\n" if args.format == "json" else
+                         f"# Run {row['id']} — {row['label']}\n\n"
+                         f"- Created: {row['created_at']}\n- Status: {row['status']}\n"
+                         f"- Score: {row['anomaly_score']:.3f}\n- Events: {row['event_count']}\n"
+                         f"- Coverage: {row['coverage']:.2f}\n"
+                         f"- Reason codes: {', '.join(row['summary'].get('reason_codes') or []) or 'none'}\n")
+        return 0
+    rows = list_runs(args.db, args.limit)
+    if args.format == "json":
+        sys.stdout.write(render_json({"db": args.db, "runs": rows}) + "\n")
+        return 0
+    if not rows:
+        sys.stdout.write(f"No runs recorded in {args.db}. Use `cabid analyze --save-history`.\n")
+        return 0
+    sys.stdout.write(f"# CABID history ({args.db})\n\n| # | When | Label | Status | Score | Events |\n"
+                     "| --- | --- | --- | --- | --- | --- |\n")
+    for row in rows:
+        sys.stdout.write(f"| {row['id']} | {row['created_at']} | {row['label']} | {row['status']} | "
+                         f"{row['anomaly_score']:.3f} | {row['event_count']} |\n")
+    return 0
+
+
+def _compare_stored(left: dict, right: dict) -> dict:
+    left_codes = [code for code in left["summary"].get("reason_codes", []) if code]
+    right_codes = [code for code in right["summary"].get("reason_codes", []) if code]
+    return {
+        "left": {"id": left["id"], "label": left["label"], "status": left["status"],
+                 "anomaly_score": left["anomaly_score"], "event_count": left["event_count"]},
+        "right": {"id": right["id"], "label": right["label"], "status": right["status"],
+                  "anomaly_score": right["anomaly_score"], "event_count": right["event_count"]},
+        "status_changed": left["status"] != right["status"],
+        "score_delta": round(right["anomaly_score"] - left["anomaly_score"], 6),
+        "new_reason_codes": sorted(set(right_codes) - set(left_codes)),
+        "cleared_reason_codes": sorted(set(left_codes) - set(right_codes)),
+    }
 
 
 def _cmd_watch(args) -> int:
@@ -287,6 +406,8 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.command == "analyze":
             return _cmd_analyze(args)
+        if args.command == "history":
+            return _cmd_history(args)
         if args.command == "watch":
             return _cmd_watch(args)
         if args.command == "dashboard":
@@ -309,7 +430,8 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "init-config":
             return _cmd_init_config(args)
         raise ValueError(f"unknown command: {args.command}")
-    except (OSError, EventError, ConfigError, PolicyError, json.JSONDecodeError, ValueError) as exc:
+    except (OSError, EventError, ConfigError, PolicyError, HistoryError, IngestError,
+            FilterError, json.JSONDecodeError, ValueError) as exc:
         return _fail(str(exc))
 
 

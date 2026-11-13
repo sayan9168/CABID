@@ -12,7 +12,7 @@ context: it never rewrites the heuristic score.
 Without `--policy`, default patterns are still evaluated (so findings are never
 silently absent), and the report marks `policy_applied: false`.
 
-## Policy file (`cabid-policy/1`)
+## Policy file (`cabid-policy/2`; `cabid-policy/1` files still load)
 
 ```json
 {
@@ -21,6 +21,7 @@ silently absent), and the report marks `policy_applied: false`.
   "allow_process_names": ["systemd", "sshd"],
   "allow_executables": ["/usr/lib/systemd/", "/usr/sbin/sshd"],
   "suppress_rule_codes": ["temporal_rate_or_burst"],
+  "suppress_for_processes": {"backup-agent": ["sensitive_path_write"]},
   "notes": "Reviewed 2026-11-13; file patterns scoped to this host group."
 }
 ```
@@ -31,6 +32,17 @@ silently absent), and the report marks `policy_applied: false`.
 | `sensitive_ports` | Integer ports matched against `network_connect` targets (`host:port`, `[v6]:port`, `host@port`). |
 | `allow_process_names` / `allow_executables` | Known-good matching. Findings are still reported but marked `allow_listed_process: true` so reviewers can triage quickly. |
 | `suppress_rule_codes` | Reason codes removed from the report's `reasons` list. Suppressed codes are listed in the output, never dropped silently. |
+| `suppress_for_processes` | Per-process finding suppression: `{"name": ["rule_code", ...]}`. Matched by `process_name`; the suppressed count is still reported in `suppressed_findings`. |
+
+## Why per-process suppression exists
+
+A backup agent or a log shipper legitimately writes to paths that a broad
+`sensitive_paths` pattern also matches. Suppressing that process's findings keeps
+the policy useful without deleting the rule globally, and the report still shows
+`suppressed_findings` plus `suppressed_for_processes` so a reviewer can see the
+allowance in place. Suppression is scoped narrowly on purpose: a global
+`suppress_rule_codes` entry hides the finding for every process and should be the
+exception.
 
 Unknown keys, non-string patterns, and out-of-range ports are rejected with exit
 status `2`.

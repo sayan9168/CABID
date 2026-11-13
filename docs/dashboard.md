@@ -13,6 +13,10 @@ Then open <http://127.0.0.1:8765/>.
 - Runs the same engine as `cabid analyze` (config, policy, windows).
 - Shows the verdict, component weights, weighted contributions, ordered reasons,
   lifecycle transitions, policy findings, and per-window scores as a spark chart.
+- Merges every bundled fixture in one analysis ("Merge all") and applies a time
+  range (Since/Until), showing the kept/total event counts.
+- Opens a **Processes** tab with the per-pid rollup: risk bar, contradictions,
+  sensitive hits — the same numbers as the CLI `entities` block.
 - Runs the synthetic benchmark with adjustable seed and sample count.
 
 ## API
@@ -24,10 +28,12 @@ Then open <http://127.0.0.1:8765/>.
 | `GET` | `/api/datasets/<name>` | normalized events from one fixture |
 | `GET` | `/api/defaults` | resolved default configuration and policy |
 | `GET` | `/api/benchmark?seed=&per_class=` | synthetic benchmark report |
-| `POST` | `/api/analyze` | `{events, window_seconds?, config?, policy?}` → report |
+| `POST` | `/api/analyze` | `{events | datasets, since?, until?, window_seconds?, config?, policy?}` → report |
 | `POST` | `/api/baseline` | `{datasets: [...]}` → baseline profile |
 
-`events` accepts either a JSON array or a JSONL string. Event normalization and
+`events` accepts either a JSON array or a JSONL string. `datasets` accepts a list
+of bundled fixture names and merges them exactly like the CLI multi-file mode.
+`since`/`until` take ISO-8601 or Unix seconds. Event normalization, filtering, and
 configuration validation are identical to the CLI, so an API error means the same
 thing as a CLI error.
 

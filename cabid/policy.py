@@ -11,7 +11,8 @@ import fnmatch
 import json
 from pathlib import Path
 
-POLICY_FORMAT = "cabid-policy/1"
+POLICY_FORMAT = "cabid-policy/2"
+SUPPORTED_FORMATS = {"cabid-policy/1", POLICY_FORMAT}
 
 DEFAULT_POLICY: dict = {
     "format": POLICY_FORMAT,
@@ -23,6 +24,7 @@ DEFAULT_POLICY: dict = {
     "allow_process_names": ["systemd", "sshd", "cron", "dbus-daemon", "systemd-journald"],
     "allow_executables": ["/usr/lib/systemd/", "/usr/sbin/sshd", "/usr/sbin/cron"],
     "suppress_rule_codes": [],
+    "suppress_for_processes": {},
     "notes": "Defaults are illustrative; review before use in any environment.",
 }
 
@@ -50,6 +52,9 @@ def load_policy(path: str | Path | None) -> dict:
         raise PolicyError(f"{source}: invalid JSON: {exc}") from exc
     if not isinstance(raw, dict):
         raise PolicyError(f"{source}: policy must be a JSON object")
+    declared = raw.pop("format", POLICY_FORMAT)
+    if declared not in SUPPORTED_FORMATS:
+        raise PolicyError(f"{source}: unsupported policy format: {declared}")
     unknown = sorted(set(raw) - set(DEFAULT_POLICY))
     if unknown:
         raise PolicyError(f"{source}: unknown policy keys: {', '.join(unknown)}")
@@ -67,6 +72,15 @@ def load_policy(path: str | Path | None) -> dict:
             raise PolicyError("sensitive_ports must contain integers between 1 and 65535")
         clean_ports.append(port)
     policy["sensitive_ports"] = sorted(set(clean_ports))
+    scoped = policy.get("suppress_for_processes") or {}
+    if not isinstance(scoped, dict):
+        raise PolicyError("suppress_for_processes must be an object of name -> [codes]")
+    clean_scoped = {}
+    for name, codes in scoped.items():
+        if not isinstance(name, str) or not name.strip():
+            raise PolicyError("suppress_for_processes keys must be non-empty process names")
+        clean_scoped[name.strip()] = _string_list(codes, f"suppress_for_processes.{name}")
+    policy["suppress_for_processes"] = clean_scoped
     return policy
 
 
@@ -100,8 +114,10 @@ def evaluate_policy(events: list[dict], policy: dict | None = None,
     allow_names = list(active.get("allow_process_names") or [])
     allow_execs = list(active.get("allow_executables") or [])
     suppressed_codes = set(active.get("suppress_rule_codes") or [])
+    scoped = dict(active.get("suppress_for_processes") or {})
 
     findings: list[dict] = []
+    suppressed_findings = 0
     allowed_events = 0
     flagged_events: list[dict] = []
     for index, event in enumerate(events):
@@ -114,21 +130,30 @@ def evaluate_policy(events: list[dict], policy: dict | None = None,
         target = str(event.get("target") or "")
         hit_path = _matches(target, paths) if target and event["event_type"] == "file_write" else None
         port = _port_of(target) if event["event_type"] == "network_connect" else None
+        scoped_codes = set(scoped.get(name) or [])
         if hit_path:
-            findings.append({
+            finding = {
                 "rule": "sensitive_path_write", "event_index": index,
                 "severity": "high" if allowed_by_name or allowed_by_exec else "medium",
                 "detail": f"write-capable event on sensitive path pattern {hit_path}",
                 "process_name": name, "target_ref": _safe_ref(target),
                 "allow_listed_process": bool(allowed_by_name or allowed_by_exec),
-            })
+            }
+            if finding["rule"] in scoped_codes:
+                suppressed_findings += 1
+            else:
+                findings.append(finding)
         if port is not None and port in ports:
-            findings.append({
+            finding = {
                 "rule": "sensitive_port_connect", "event_index": index, "severity": "high",
                 "detail": f"connection to policy-sensitive port {port}",
                 "process_name": name, "target_ref": _safe_ref(target),
                 "allow_listed_process": bool(allowed_by_name or allowed_by_exec),
-            })
+            }
+            if finding["rule"] in scoped_codes:
+                suppressed_findings += 1
+            else:
+                findings.append(finding)
         if hit_path or (port is not None and port in ports):
             flagged_events.append({
                 "event_type": event["event_type"], "process_id": event["process_id"],
@@ -156,12 +181,15 @@ def evaluate_policy(events: list[dict], policy: dict | None = None,
         "sensitive_path_patterns": len(paths),
         "sensitive_ports": sorted(ports),
         "allow_listed_events": allowed_events,
+        "suppressed_findings": suppressed_findings,
+        "suppressed_for_processes": sorted(scoped),
         "suppressed_reason_codes": sorted(set(suppressed)),
         "reasons_after_suppression": kept_reasons,
         "notes": [
             "Policy findings are operator-defined context, not model output.",
             "A write-capable event proves intent to write, not that data changed.",
             "Default patterns are illustrative and must be reviewed per host.",
+            "Process-scoped suppressions hide findings for that process only; the count is still reported.",
         ],
     }
 

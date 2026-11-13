@@ -27,5 +27,16 @@
 - Reports may include basenames of touched paths and process names from untrusted
   logs. Review before sharing, even though full command lines and targets are
   truncated.
+- The entity rollup is a triage hint, not an attribution. High-ranked processes are
+  those least consistent with the observed baseline; noisy-but-benign services look
+  the same way.
+- Multi-source merge assumes a shared clock. Cross-host skew reorders events and can
+  change lifecycle and sequence results; duplicates are counted by fingerprint, not
+  removed, and overlapping ranges may double-count the same activity.
+- Time filtering is inclusive and UTC-first for naive timestamps. A filtered report
+  is always marked with the trimmed event counts.
+- The history database is a local convenience store, not a tamper-evident audit log.
+  It contains summary metrics only (no paths, command lines, or addresses), but
+  anyone with write access can alter it.
 - Test only on systems and logs you own or are authorized to analyze. The sample
   dataset uses the reserved `.invalid` domain.

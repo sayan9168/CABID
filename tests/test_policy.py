@@ -1,3 +1,5 @@
+import json
+
 import pytest
 
 from cabid.ingest import normalize_many
@@ -6,7 +8,7 @@ from cabid.policy import DEFAULT_POLICY, PolicyError, evaluate_policy, load_poli
 
 def test_load_policy_defaults_when_path_is_none():
     policy = load_policy(None)
-    assert policy["format"] == "cabid-policy/1"
+    assert policy["format"] == "cabid-policy/2"
     assert "/etc/shadow" in policy["sensitive_paths"]
     assert policy is not DEFAULT_POLICY
 
@@ -78,3 +80,43 @@ def test_custom_policy_is_applied():
     events = normalize_many([{"timestamp": 1, "event_type": "file_write", "process_id": 1,
                               "target": "/srv/app/secrets.env"}])
     assert evaluate_policy(events, policy)["finding_count"] == 1
+
+
+def test_policy_format_1_files_still_load(tmp_path):
+    path = tmp_path / "legacy.json"
+    path.write_text(json.dumps({"format": "cabid-policy/1", "sensitive_ports": [2222]}), encoding="utf-8")
+    policy = load_policy(path)
+    assert policy["sensitive_ports"] == [2222]
+    assert policy["format"] == "cabid-policy/2"
+
+
+def test_unsupported_policy_format_is_rejected(tmp_path):
+    path = tmp_path / "future.json"
+    path.write_text(json.dumps({"format": "cabid-policy/99"}), encoding="utf-8")
+    with pytest.raises(PolicyError, match="unsupported policy format"):
+        load_policy(path)
+
+
+def test_process_scoped_suppression_is_validated(tmp_path):
+    path = tmp_path / "scoped.json"
+    path.write_text(json.dumps({"suppress_for_processes": {"backup-agent": ["temporal_rate_or_burst"]}}),
+                    encoding="utf-8")
+    assert load_policy(path)["suppress_for_processes"]["backup-agent"] == ["temporal_rate_or_burst"]
+    bad = tmp_path / "bad.json"
+    bad.write_text(json.dumps({"suppress_for_processes": ["a"]}), encoding="utf-8")
+    with pytest.raises(PolicyError):
+        load_policy(bad)
+
+
+def test_process_scoped_suppression_only_affects_that_process():
+    policy = load_policy(None)
+    policy["suppress_for_processes"] = {"noisy-agent": ["sensitive_path_write"]}
+    events = normalize_many([
+        {"timestamp": 1, "event_type": "file_write", "process_id": 4,
+         "process_name": "noisy-agent", "target": "/etc/shadow"},
+        {"timestamp": 2, "event_type": "file_write", "process_id": 5,
+         "process_name": "curl", "target": "/etc/shadow"},
+    ])
+    result = evaluate_policy(events, policy)
+    assert [finding["process_name"] for finding in result["findings"]] == ["curl"]
+    assert result["suppressed_findings"] == 1

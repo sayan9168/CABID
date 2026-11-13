@@ -88,6 +88,13 @@
     <div class="row">
       <select id="dataset" aria-label="bundled dataset"><option value="">bundled fixture…</option></select>
       <button id="load">Load</button>
+      <button id="merge" title="Analyze the selected fixtures together">Merge all</button>
+    </div>
+    <div class="row">
+      <label for="since" style="margin:0">Since</label>
+      <input id="since" placeholder="ISO or epoch" aria-label="since">
+      <label for="until" style="margin:0">Until</label>
+      <input id="until" placeholder="ISO or epoch" aria-label="until">
     </div>
     <label for="events">Events (JSONL)</label>
     <textarea id="events" spellcheck="false" placeholder='{"timestamp":1760000000,"event_type":"process_start","process_id":100,"parent_process_id":1}'></textarea>
@@ -122,11 +129,14 @@
       <div class="metric"><span>Events</span><strong id="count">–</strong></div>
       <div class="metric"><span>Coverage</span><strong id="coverage">–</strong></div>
       <div class="metric"><span>Baseline</span><strong id="baseline">–</strong></div>
+      <div class="metric"><span>Flagged pids</span><strong id="flagged">–</strong></div>
+      <div class="metric"><span>Sources</span><strong id="sources">–</strong></div>
     </div>
     <div class="tabs" role="tablist">
       <button role="tab" aria-selected="true" data-tab="why">Why</button>
       <button role="tab" aria-selected="false" data-tab="components">Components</button>
       <button role="tab" aria-selected="false" data-tab="lifecycle">Lifecycle</button>
+      <button role="tab" aria-selected="false" data-tab="entities">Processes</button>
       <button role="tab" aria-selected="false" data-tab="policy">Policy</button>
       <button role="tab" aria-selected="false" data-tab="windows">Windows</button>
       <button role="tab" aria-selected="false" data-tab="bench">Benchmark</button>
@@ -167,6 +177,12 @@ function renderVerdict(report) {
   const coverage = report.completeness ? Number(report.completeness.completeness) * 100 : null;
   $("coverage").textContent = coverage === null ? "–" : coverage.toFixed(0) + "%";
   $("baseline").textContent = report.baseline_used ? "yes" : "no";
+  $("flagged").textContent = report.entities ? (report.entities.flagged_entity_count ?? 0) : "–";
+  $("sources").textContent = report.sources ? report.sources.source_count : "1";
+  const filter = report.time_filter;
+  $("digest").textContent = filter && filter.active
+    ? `filtered: ${filter.events_out}/${filter.events_in} events`
+    : (report.config_digest ? "config " + String(report.config_digest).slice(0, 12) : "no report");
   $("digest").textContent = report.config_digest ? "config " + String(report.config_digest).slice(0, 12) : "no report";
   renderTab(activeTab());
 }
@@ -213,6 +229,23 @@ function renderTab(tab) {
         ? '<table><tr><th>Transition</th><th>Count</th></tr>' + transitions.map((item) =>
             `<tr><td><code>${esc(item.from)}</code> → <code>${esc(item.to)}</code></td><td>${esc(item.count)}</td></tr>`).join("") + "</table>"
         : '<div class="empty">No multi-step process transitions observed.</div>');
+  } else if (tab === "entities") {
+    const entities = report.entities;
+    if (!entities) { pane.innerHTML = '<div class="empty">No process rollup in this report.</div>'; return; }
+    const rows = entities.top_entities || [];
+    pane.innerHTML = `<div class="metrics">
+        <div class="metric"><span>Processes</span><strong>${esc(entities.entity_count)}</strong></div>
+        <div class="metric"><span>With risk signal</span><strong>${esc(entities.flagged_entity_count)}</strong></div>
+      </div>
+      <p class="hint" style="margin:8px 0 12px">${esc(entities.ranking_semantics || "")}</p>` +
+      (rows.length ? '<table><tr><th>PID</th><th>Process</th><th>Events</th><th>Risk</th>' +
+        '<th>Contradictions</th><th>Sensitive hits</th></tr>' + rows.map((entity) =>
+          `<tr><td>${esc(entity.process_id)}</td><td>${esc((entity.process_names || []).join(", "))}</td>` +
+          `<td>${esc(entity.event_count)}</td>` +
+          `<td><div class="bar" style="width:90px"><i style="width:${(Number(entity.entity_risk) * 100).toFixed(0)}%"></i></div>` +
+          `<small>${fmt(entity.entity_risk)}</small></td>` +
+          `<td>${esc(entity.contradiction_events)}</td><td>${esc(entity.sensitive_hits)}</td></tr>`).join("") +
+        "</table>" : '<div class="empty">No processes observed.</div>');
   } else if (tab === "policy") {
     const policy = report.policy;
     if (!policy) {
@@ -283,6 +316,8 @@ $("run").addEventListener("click", async () => {
   const body = { events: $("events").value };
   const windowValue = $("window").value;
   if (windowValue) body.window_seconds = Number(windowValue);
+  if ($("since").value.trim()) body.since = $("since").value.trim();
+  if ($("until").value.trim()) body.until = $("until").value.trim();
   if ($("policy").value === "on") {
     try { body.policy = (await api("/api/defaults")).policy; }
     catch (err) { showError("could not load policy: " + err.message); return; }
@@ -308,6 +343,26 @@ $("load").addEventListener("click", async () => {
     $("events").value = payload.events.map((event) => JSON.stringify(event)).join("\n");
     if (activeTab() === "events") renderTab("events");
   } catch (err) { showError(err.message); }
+});
+
+$("merge").addEventListener("click", async () => {
+  showError("");
+  const names = window.__datasetNames || [];
+  if (!names.length) { showError("no bundled fixtures available to merge"); return; }
+  const body = { datasets: names };
+  if ($("since").value.trim()) body.since = $("since").value.trim();
+  if ($("until").value.trim()) body.until = $("until").value.trim();
+  if ($("window").value) body.window_seconds = Number($("window").value);
+  try {
+    $("merge").disabled = true;
+    renderVerdict(await api("/api/analyze", {
+      method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body),
+    }));
+  } catch (err) {
+    showError(err.message);
+  } finally {
+    $("merge").disabled = false;
+  }
 });
 
 $("sample").addEventListener("click", () => {
@@ -348,6 +403,7 @@ $("bench").addEventListener("click", async () => {
       option.textContent = item.name;
       $("dataset").appendChild(option);
     }
+    window.__datasetNames = (datasets.datasets || []).map((item) => item.name);
     if ((datasets.datasets || []).length) {
       $("dataset").value = datasets.datasets[0].name;
       $("load").click();
