@@ -85,3 +85,10 @@ Do **not** open a public issue. See [SECURITY.md](SECURITY.md).
 ## License
 
 Contributions are accepted under the MIT License (see `LICENSE`).
+
+## Releasing
+
+See docs/releasing.md. Short version: `make check` and `make smoke` must pass, the
+version is bumped in `cabid/__init__.py`, `pyproject.toml`, and the README, the
+CHANGELOG gains a dated section, and the tag must match the packaged version.
+PyPI publishing is a trusted-publisher workflow — no tokens live in the repo.

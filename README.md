@@ -213,6 +213,7 @@ file_write, network_connect, process_exit, heartbeat. See docs/event-schema.md.
 | docs/linux-collector.md | procfs collector limits |
 | docs/benchmark.md | synthetic benchmark caveats |
 | docs/limitations.md | safe-use notes |
+| docs/releasing.md | release checklist and the PyPI trusted-publisher setup |
 
 ## Research and limitations
 
