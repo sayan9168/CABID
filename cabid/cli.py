@@ -20,6 +20,9 @@ from .history import DEFAULT_DB, HistoryError, compare_runs, list_runs, record_r
 from .ingest import normalize_many, read_jsonl
 from .normalize import EventError
 from .policy import PolicyError, evaluate_policy, load_policy
+from .rules import RuleError, load_rules
+from .signature import SealError, seal_report, sign_file, verify_file
+from .timeline import build_timeline, render_timeline_markdown, render_timeline_text
 from .watch import watch_file
 
 EXIT_CODES = {"NO_ANOMALY_DETECTED": 0, "INSUFFICIENT_EVIDENCE": 0, "SUSPICIOUS": 1, "HIGH_RISK": 2}
@@ -94,6 +97,32 @@ def _build_parser() -> argparse.ArgumentParser:
     run.add_argument("--label", default="run", help="label for the history record")
     run.add_argument("--compare-history", type=int, metavar="RUN_ID",
                      help="diff this run against a stored run id")
+    run.add_argument("--rules", "-r", help="correlation rule file (default: built-in pack)")
+    run.add_argument("--no-rules", action="store_true", help="skip correlation rules entirely")
+    run.add_argument("--no-tree", action="store_true", help="skip process-tree reconstruction")
+    run.add_argument("--seal-key-env", metavar="VAR",
+                     help="HMAC key read from this environment variable when sealing")
+    run.add_argument("--sign", action="store_true",
+                     help="add an integrity seal to JSON output")
+
+    tl = sub.add_parser("timeline", help="export a chronological investigation timeline")
+    tl.add_argument("input", nargs="+")
+    tl.add_argument("--output", "-o")
+    tl.add_argument("--format", "-f", choices=("md", "json", "txt"), default="md")
+    tl.add_argument("--limit", type=int, default=300)
+    tl.add_argument("--config", "-c")
+    tl.add_argument("--baseline", "-b")
+    tl.add_argument("--policy", "-p")
+    tl.add_argument("--rules", "-r")
+    tl.add_argument("--since")
+    tl.add_argument("--until")
+
+    seal = sub.add_parser("seal", help="seal a JSON report or verify an existing seal")
+    seal.add_argument("report")
+    seal.add_argument("--key-env", metavar="VAR", help="HMAC key from this environment variable")
+    seal.add_argument("--verify", action="store_true", help="verify instead of sealing")
+    seal.add_argument("--output", "-o")
+    seal.add_argument("--quiet", "-q", action="store_true")
 
     hist = sub.add_parser("history", help="list or inspect recorded runs")
     hist.add_argument("--db", default=DEFAULT_DB)
@@ -153,6 +182,7 @@ def _build_parser() -> argparse.ArgumentParser:
     watch.add_argument("--baseline", "-b")
     watch.add_argument("--policy", "-p")
     watch.add_argument("--json", action="store_true", help="emit newline-delimited JSON per poll")
+    watch.add_argument("--rules", "-r", help="correlation rule file (default: built-in pack)")
     return parser
 
 
@@ -173,8 +203,13 @@ def _cmd_analyze(args) -> int:
     config = load_config(args.config)
     profile = load_profile(args.baseline) if args.baseline else None
     policy = load_policy(args.policy)
+    rules = [] if args.no_rules else load_rules(args.rules)
     events, metadata = _load_analyze_events(args)
-    report = analyze(events, config, profile, policy)
+    report = analyze(events, config, profile, policy, rules)
+    if args.no_tree:
+        report.pop("tree", None)
+    if args.no_rules:
+        report.pop("rules", None)
     evaluation = evaluate_policy(events, policy, report.get("reasons"))
     if evaluation["reasons_after_suppression"]:
         report["reasons"] = evaluation["reasons_after_suppression"]
@@ -183,7 +218,11 @@ def _cmd_analyze(args) -> int:
         report["sources"] = metadata["sources"]
     report["time_filter"] = metadata["time_filter"]
     if args.window:
-        report["windowed"] = analyze_windows(events, args.window, config, profile, policy)
+        report["windowed"] = analyze_windows(events, args.window, config, profile, policy, rules)
+        if args.no_rules:
+            for block in (report["windowed"], report["windowed"].get("aggregate") or {}):
+                if isinstance(block, dict):
+                    block.pop("rules", None)
     if args.compare_history is not None:
         report["history_comparison"] = compare_runs(report, args.compare_history, args.history_db)
     if args.save_history:
@@ -191,7 +230,58 @@ def _cmd_analyze(args) -> int:
             "database": str(args.history_db),
             "run_id": record_run(report, args.history_db, args.label, ", ".join(args.input)),
         }
+    if args.sign:
+        key = _key_from_env(args.seal_key_env)
+        report = seal_report(report, key)
     return _emit(report, args)
+
+
+def _key_from_env(variable: str | None) -> str | None:
+    if not variable:
+        return None
+    import os
+
+    value = os.environ.get(variable)
+    if not value:
+        raise SealError(f"environment variable {variable} is not set or is empty")
+    return value
+
+
+def _cmd_timeline(args) -> int:
+    config = load_config(args.config)
+    profile = load_profile(args.baseline) if args.baseline else None
+    policy = load_policy(args.policy)
+    rules = load_rules(args.rules)
+    events, _metadata = _load_analyze_events(args)
+    report = analyze(events, config, profile, policy, rules)
+    report["policy"] = evaluate_policy(events, policy, report.get("reasons"))
+    timeline = build_timeline(events, report, limit=args.limit)
+    if args.format == "json":
+        payload = render_json(timeline) + "\n"
+    elif args.format == "txt":
+        payload = render_timeline_text(timeline)
+    else:
+        payload = render_timeline_markdown(timeline)
+    if args.output:
+        destination = Path(args.output)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_text(payload, encoding="utf-8")
+        sys.stdout.write(f"CABID: timeline written to {destination}\n")
+    else:
+        sys.stdout.write(payload)
+    return 0
+
+
+def _cmd_seal(args) -> int:
+    key = _key_from_env(args.key_env)
+    if args.verify:
+        result = verify_file(args.report, key)
+        sys.stdout.write(render_json(result) + "\n")
+        return 0 if result["verified"] else 1
+    seal = sign_file(args.report, key, args.output)
+    if not args.quiet:
+        sys.stdout.write(render_json(seal) + "\n")
+    return 0
 
 
 def _cmd_history(args) -> int:
@@ -272,6 +362,7 @@ def _cmd_watch(args) -> int:
     config = load_config(args.config)
     profile = load_profile(args.baseline) if args.baseline else None
     policy = load_policy(args.policy)
+    rules = load_rules(args.rules)
 
     def emit(report: dict) -> None:
         payload = evaluate_policy([], policy, report.get("reasons"))
@@ -289,7 +380,8 @@ def _cmd_watch(args) -> int:
 
     watch_file(
         args.input, window_seconds=args.window, interval=args.interval,
-        iterations=args.iterations, config=config, profile=profile, on_report=emit,
+        iterations=args.iterations, config=config, profile=profile, rules=rules,
+        on_report=emit,
     )
     return 0
 
@@ -408,6 +500,10 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_analyze(args)
         if args.command == "history":
             return _cmd_history(args)
+        if args.command == "timeline":
+            return _cmd_timeline(args)
+        if args.command == "seal":
+            return _cmd_seal(args)
         if args.command == "watch":
             return _cmd_watch(args)
         if args.command == "dashboard":
@@ -431,7 +527,7 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_init_config(args)
         raise ValueError(f"unknown command: {args.command}")
     except (OSError, EventError, ConfigError, PolicyError, HistoryError, IngestError,
-            FilterError, json.JSONDecodeError, ValueError) as exc:
+            FilterError, RuleError, SealError, json.JSONDecodeError, ValueError) as exc:
         return _fail(str(exc))
 
 

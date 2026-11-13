@@ -11,6 +11,8 @@ from .causal import causal_features
 from .completeness import completeness_features
 from .config import DEFAULT_CONFIG, config_digest, default_config, validate_config
 from .entities import entity_features
+from .rules import evaluate_rules, load_rules
+from .tree import process_tree
 from .sequence import sequence_features
 from .temporal import temporal_features, temporal_score
 
@@ -23,11 +25,14 @@ def _reason(code: str, detail: str, weight: float, value: float) -> dict:
 
 
 def analyze(events: list[dict], config: dict | None = None, profile: dict | None = None,
-            policy: dict | None = None) -> dict:
+            policy: dict | None = None, rules: list[dict] | None = None) -> dict:
     """Analyze normalized events and return a structured, explainable report.
 
-    ``policy`` is optional and only feeds the per-process entity rollup; policy
-    findings themselves are produced by :func:`cabid.policy.evaluate_policy`.
+    ``policy`` feeds the per-process entity rollup; policy findings themselves are
+    produced by :func:`cabid.policy.evaluate_policy`. ``rules`` defaults to the
+    built-in correlation pack; pass an explicit list (including ``[]``) to control
+    what is evaluated. Rule and tree output are context only: neither changes the
+    weighted score.
     """
     cfg = validate_config(config or {})
     weights = cfg["weights"]
@@ -49,6 +54,9 @@ def analyze(events: list[dict], config: dict | None = None, profile: dict | None
         baseline_profile = load_profile(cfg["baseline"])
     novelty = novelty_features(events, baseline_profile)
     entities = entity_features(events, policy, baseline_profile)
+    tree = process_tree(events, baseline_profile)
+    active_rules = load_rules(None) if rules is None else rules
+    rule_report = evaluate_rules(events, active_rules)
 
     t_score = temporal_score(temporal, thresholds)
     c_score = float(causal["causal_score"])
@@ -134,6 +142,8 @@ def analyze(events: list[dict], config: dict | None = None, profile: dict | None
         "completeness": completeness,
         "novelty": novelty,
         "entities": entities,
+        "tree": tree,
+        "rules": rule_report,
         "reasons": reasons,
         "event_count": len(events),
         "config_digest": config_digest(cfg),
@@ -144,7 +154,7 @@ def analyze(events: list[dict], config: dict | None = None, profile: dict | None
 
 def analyze_windows(events: list[dict], window_seconds: float,
                     config: dict | None = None, profile: dict | None = None,
-                    policy: dict | None = None) -> dict:
+                    policy: dict | None = None, rules: list[dict] | None = None) -> dict:
     """Split a stream into fixed windows and analyze each independently."""
     if not isinstance(window_seconds, (int, float)) or window_seconds <= 0:
         raise ValueError("window_seconds must be positive")
@@ -158,7 +168,7 @@ def analyze_windows(events: list[dict], window_seconds: float,
         buckets.setdefault(index, []).append(event)
     windows, reports = [], []
     for index in sorted(buckets):
-        report = analyze(buckets[index], config, profile, policy)
+        report = analyze(buckets[index], config, profile, policy, rules)
         reports.append(report)
         windows.append({
             "window_index": index,
@@ -181,7 +191,7 @@ def analyze_windows(events: list[dict], window_seconds: float,
     return {
         "window_seconds": float(window_seconds),
         "windows": windows,
-        "aggregate": analyze(ordered, config, profile, policy),
+        "aggregate": analyze(ordered, config, profile, policy, rules),
         "summary": {
             "window_count": len(windows),
             "status_counts": dict(sorted(counts.items())),

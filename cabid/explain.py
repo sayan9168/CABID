@@ -10,6 +10,7 @@ import csv
 import html
 import io
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 
 from . import __version__
@@ -32,6 +33,7 @@ _RULE_HELP = {
     "sensitive_port_connect": "A connection targeted a port declared sensitive by operator policy.",
     "entity_risk": "A process showed behaviour inconsistent with the observed baseline.",
     "history_regression": "This run scored materially higher than the compared history run.",
+    "rule_finding": "A declarative correlation rule matched an event pattern.",
 }
 
 
@@ -141,6 +143,44 @@ def render_markdown(report: dict) -> str:
         for item in sequence["common_transitions"]:
             lines.append(f"| {item['from']} → {item['to']} | {item['count']} |")
         lines.append("")
+
+    rules_block = report.get("rules") or {}
+    if rules_block.get("finding_count"):
+        counts = rules_block.get("severity_counts") or {}
+        lines += ["## Correlation rule matches", "",
+                  f"- Rules evaluated: {rules_block.get('rule_count', 0)}",
+                  f"- Rules matched: {rules_block.get('matched_rule_count', 0)}",
+                  f"- Findings: {rules_block.get('finding_count', 0)} ("
+                  + ", ".join(f"{name}: {count}" for name, count in counts.items()) + ")", ""]
+        lines += ["| Rule | Severity | Steps | At (UTC) | Process ids |", "| --- | --- | --- | --- | --- |"]
+        for finding in rules_block["findings"][:12]:
+            stamp = datetime.fromtimestamp(finding["start_timestamp"], tz=timezone.utc).isoformat(
+                timespec="seconds") if finding.get("start_timestamp") else "n/a"
+            lines.append(f"| `{finding['rule_id']}` | {finding['severity']} | {finding['matched_steps']} | "
+                         f"{stamp} | {', '.join(str(pid) for pid in finding['process_ids'])} |")
+        if rules_block.get("finding_count", 0) > 12:
+            lines.append(f"| … | {rules_block['finding_count'] - 12} more | | | |")
+        lines.append("")
+        lines.append(f"_{rules_block.get('semantics', '')}_")
+        lines.append("")
+
+    tree = report.get("tree") or {}
+    if tree.get("node_count"):
+        lines += ["## Process tree", "",
+                  f"- Nodes: {tree.get('node_count', 0)}, edges: {tree.get('edge_count', 0)}, "
+                  f"roots: {tree.get('root_count', 0)}",
+                  f"- Max depth: {tree.get('max_depth', 0)}, cycles: {tree.get('cycle_count', 0)}",
+                  f"- Baseline edge comparison: {'yes' if tree.get('baseline_compared') else 'no'}", ""]
+        if tree.get("findings"):
+            lines += ["| Kind | Severity | Detail |", "| --- | --- | --- |"]
+            for finding in tree["findings"][:10]:
+                lines.append(f"| `{finding['kind']}` | {finding['severity']} | {finding['detail']} |")
+            lines.append("")
+        if tree.get("common_edges"):
+            lines += ["| Parent → child | Count |", "| --- | --- |"]
+            for edge in tree["common_edges"][:6]:
+                lines.append(f"| {edge['parent']} → {edge['child']} | {edge['count']} |")
+            lines.append("")
 
     entities = report.get("entities") or {}
     if entities.get("top_entities"):
@@ -262,6 +302,11 @@ def render_csv(report: dict) -> str:
             "policy", status, score, finding.get("rule", ""), finding.get("severity", ""), "", "",
             finding.get("process_name", ""), finding.get("detail", ""), top,
         ])
+    for finding in (report.get("rules") or {}).get("findings") or []:
+        writer.writerow([
+            "rule", status, score, finding.get("severity", ""), finding.get("matched_steps", ""),
+            "", "", finding.get("rule_id", ""), finding.get("title", ""), top,
+        ])
     for entity in (report.get("entities") or {}).get("top_entities") or []:
         writer.writerow([
             "entity", status, score, entity.get("entity_risk", ""), "", "", "",
@@ -284,6 +329,29 @@ def render_csv(report: dict) -> str:
 
 def _sarif_results(report: dict, source: str) -> list[dict]:
     results = []
+    for finding in (report.get("rules") or {}).get("findings") or []:
+        level = {"critical": "error", "high": "error", "medium": "warning"}.get(
+            str(finding.get("severity")), "note")
+        results.append({
+            "ruleId": str(finding.get("rule_id")),
+            "level": level,
+            "message": {"text": str(finding.get("title") or finding.get("rule_id"))},
+            "properties": {
+                "kind": finding.get("kind"),
+                "matched_steps": finding.get("matched_steps"),
+                "mitre": finding.get("mitre"),
+                "semantics": "pattern match, not a verdict",
+            },
+            "locations": [_location(source)],
+        })
+    for finding in (report.get("tree") or {}).get("findings") or []:
+        results.append({
+            "ruleId": "process_tree_structure",
+            "level": {"high": "error", "medium": "warning"}.get(str(finding.get("severity")), "note"),
+            "message": {"text": str(finding.get("detail"))},
+            "properties": {"kind": finding.get("kind")},
+            "locations": [_location(source)],
+        })
     if "windows" in report and "summary" in report:
         for window in report["windows"]:
             if window["status"] == "NO_ANOMALY_DETECTED":
@@ -449,6 +517,32 @@ def render_html(report: dict, source: str = "events.jsonl") -> str:
                 f"<td>{escape(str(reason.get('detail')))}</td></tr>"
             )
         parts.append("</table></div>")
+    rule_findings = (report.get("rules") or {}).get("findings") or []
+    if rule_findings:
+        parts.append('<div class="card"><h2 style="margin-top:0">Correlation rule matches</h2><table>')
+        parts.append("<tr><th>Rule</th><th>Severity</th><th>Steps</th><th>Processes</th></tr>")
+        for finding in rule_findings[:12]:
+            parts.append(
+                f"<tr><td><code>{escape(str(finding['rule_id']))}</code></td>"
+                f"<td>{escape(str(finding['severity']))}</td>"
+                f"<td>{int(finding['matched_steps'])}</td>"
+                f"<td>{escape(', '.join(str(pid) for pid in finding['process_ids']))}</td></tr>")
+        parts.append("</table></div>")
+
+    tree = report.get("tree") or {}
+    if tree.get("node_count"):
+        parts.append('<div class="card"><h2 style="margin-top:0">Process tree</h2>'
+                     f"<p>{int(tree['node_count'])} nodes · {int(tree['edge_count'])} edges · "
+                     f"depth {int(tree['max_depth'])} · {int(tree['cycle_count'])} cycles</p>")
+        if tree.get("findings"):
+            parts.append("<table><tr><th>Kind</th><th>Severity</th><th>Detail</th></tr>")
+            for finding in tree["findings"][:8]:
+                parts.append(f"<tr><td><code>{escape(str(finding['kind']))}</code></td>"
+                             f"<td>{escape(str(finding['severity']))}</td>"
+                             f"<td>{escape(str(finding['detail']))}</td></tr>")
+            parts.append("</table>")
+        parts.append("</div>")
+
     entities = (report.get("entities") or {}).get("top_entities") or []
     if entities:
         parts.append('<div class="card"><h2 style="margin-top:0">Process rollup</h2><table>')

@@ -57,13 +57,22 @@ def build_profile(sessions: list[tuple[str, list[dict]]], minimum_sessions: int 
     scale = float(median(deviations)) * 1.4826 or _MIN_SCALE
 
     per_process: dict[str, set[str]] = {}
+    edges: set[tuple[str, str]] = set()
     for _, events in usable:
+        names = {}
         for event in events:
             name = str(event.get("process_name") or "unknown")
             executable = str(event.get("executable") or "").strip()
             per_process.setdefault(name, set())
             if executable:
                 per_process[name].add(executable)
+            if name != "unknown":
+                names[event["process_id"]] = name
+        for event in events:
+            parent = names.get(event.get("parent_process_id") or -1)
+            child = names.get(event["process_id"])
+            if parent and child and parent != "unknown" and child != "unknown":
+                edges.add((parent, child))
 
     mix_totals = _type_mix([event for _, events in usable for event in events])
     return {
@@ -74,11 +83,13 @@ def build_profile(sessions: list[tuple[str, list[dict]]], minimum_sessions: int 
         "rate_per_minute": {"median": round(median_rate, 6), "scale": round(scale, 6)},
         "type_mix": mix_totals,
         "process_names": sorted(per_process),
+        "parent_child": [list(edge) for edge in sorted(edges)],
         "executables": {name: sorted(values) for name, values in sorted(per_process.items())},
         "notes": [
             "Derived only from sessions labelled benign by the operator.",
             "No raw paths, addresses, or command lines are stored.",
             "Novelty events require an executable set difference for a known process name.",
+            "Parent/child edges are stored as names so tree drift can be compared without pids.",
         ],
     }
 

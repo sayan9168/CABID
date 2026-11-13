@@ -38,5 +38,19 @@
 - The history database is a local convenience store, not a tamper-evident audit log.
   It contains summary metrics only (no paths, command lines, or addresses), but
   anyone with write access can alter it.
+- Correlation rules match a *shape*, not intent. `shell-from-service` fires on CGI
+  handlers and admin tooling too; the built-in pack is a starting point that must be
+  tuned per host, and a noisy rule is a measurement problem, not a threshold to
+  raise quietly.
+- Tree reconstruction uses reported pids. A missed `process_start` makes a child
+  look like a root, and pid reuse inside a long window can merge unrelated
+  processes. Depth is observed depth, not kernel depth.
+- Rule MITRE strings are prefixed `hint:` because the mapping is suggestive, not an
+  assertion that the technique was used.
+- Report seals are hash/HMAC integrity, **not** digital signatures. Whoever can
+  verify an HMAC can also forge it; use `openssl dgst -sign` for non-repudiation.
+  The seal says nothing about input authenticity or sealing time.
+- Timelines re-shape report data; an unannotated row is one that no rule or policy
+  flagged, not proof it was benign.
 - Test only on systems and logs you own or are authorized to analyze. The sample
   dataset uses the reserved `.invalid` domain.

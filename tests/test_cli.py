@@ -147,3 +147,70 @@ def test_report_contains_entity_rollup(tmp_path):
     output = tmp_path / "rollup.md"
     assert main(["analyze", "datasets/synthetic/suspicious-example.jsonl", "-o", str(output), "-q"]) == 0
     assert "Process rollup" in output.read_text(encoding="utf-8")
+
+
+def test_no_rules_and_no_tree_flags(tmp_path):
+    output = tmp_path / "r.json"
+    assert main(["analyze", "datasets/synthetic/tree-example.jsonl", "--no-rules", "--no-tree",
+                 "-o", str(output), "-q"]) == 0
+    report = json.loads(output.read_text(encoding="utf-8"))
+    assert "rules" not in report and "tree" not in report
+
+
+def test_custom_rules_file_is_used(tmp_path):
+    rules = tmp_path / "rules.json"
+    rules.write_text(json.dumps({"rules": [{
+        "id": "nginx-curl", "title": "nginx spawned curl", "severity": "critical",
+        "steps": [{"event_type": "process_start", "process_name": "nginx"},
+                  {"event_type": "process_start", "process_name": "curl", "within": 30}]}]}),
+        encoding="utf-8")
+    output = tmp_path / "r.json"
+    assert main(["analyze", "datasets/synthetic/tree-example.jsonl", "-r", str(rules),
+                 "-o", str(output), "-q"]) == 0
+    report = json.loads(output.read_text(encoding="utf-8"))
+    assert [f["rule_id"] for f in report["rules"]["findings"]] == ["nginx-curl"]
+
+
+def test_invalid_rules_file_is_an_error(tmp_path, capsys):
+    rules = tmp_path / "bad.json"
+    rules.write_text('{"rules":[{"id":"X"}]}', encoding="utf-8")
+    assert main(["analyze", "datasets/synthetic/example.jsonl", "-r", str(rules)]) == 2
+    assert "id must match" in capsys.readouterr().err
+
+
+def test_timeline_all_formats(tmp_path, capsys):
+    for fmt in ("md", "json", "txt"):
+        output = tmp_path / f"tl.{fmt}"
+        assert main(["timeline", "datasets/synthetic/tree-example.jsonl", "-f", fmt,
+                     "--limit", "5", "-o", str(output)]) == 0
+        assert output.read_text(encoding="utf-8").strip()
+    payload = json.loads((tmp_path / "tl.json").read_text(encoding="utf-8"))
+    assert payload["row_count"] == 5 and payload["truncated"] is True
+    assert any(row["annotations"] for row in payload["rows"])
+
+
+def test_seal_and_verify_cli(tmp_path, capsys, monkeypatch):
+    output = tmp_path / "sealed.json"
+    assert main(["analyze", "datasets/synthetic/example.jsonl", "--sign", "-o", str(output), "-q"]) == 0
+    assert "seal" in json.loads(output.read_text(encoding="utf-8"))
+
+    assert main(["seal", str(output), "--verify"]) == 0
+    assert json.loads(capsys.readouterr().out)["verified"] is True
+
+    tampered = json.loads(output.read_text(encoding="utf-8"))
+    tampered["anomaly_score"] = 0.99
+    (tmp_path / "t.json").write_text(json.dumps(tampered), encoding="utf-8")
+    assert main(["seal", str(tmp_path / "t.json"), "--verify"]) == 1
+    assert json.loads(capsys.readouterr().out)["verified"] is False
+
+    monkeypatch.setenv("CABID_TEST_KEY", "k")
+    assert main(["seal", str(output), "--key-env", "CABID_TEST_KEY", "-q"]) == 0
+    assert main(["seal", str(output), "--verify", "--key-env", "CABID_TEST_KEY"]) == 0
+    assert json.loads(capsys.readouterr().out)["verified"] is True
+
+
+def test_missing_key_env_is_an_error(tmp_path, capsys):
+    output = tmp_path / "r.json"
+    assert main(["analyze", "datasets/synthetic/example.jsonl", "--sign",
+                 "--seal-key-env", "CABID_NO_SUCH_VAR", "-o", str(output)]) == 2
+    assert "not set" in capsys.readouterr().err
