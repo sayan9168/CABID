@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -32,6 +33,15 @@ CREATE TABLE IF NOT EXISTS runs (
 CREATE INDEX IF NOT EXISTS runs_fingerprint ON runs(fingerprint, created_at);
 CREATE INDEX IF NOT EXISTS runs_created ON runs(created_at);
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS containments (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at TEXT NOT NULL,
+    timestamp REAL NOT NULL,
+    process_id INTEGER NOT NULL,
+    action TEXT NOT NULL,
+    config_digest TEXT
+);
+CREATE INDEX IF NOT EXISTS containments_pid ON containments(process_id, timestamp);
 """
 
 
@@ -161,3 +171,42 @@ def compare_runs(current: dict, baseline_id: int, path: str | Path = DEFAULT_DB)
         "config_changed": (current.get("config_digest") or "") not in {"", previous["config_digest"]},
         "note": "Comparison is metric-level; raw event content is never stored in history.",
     }
+
+
+def record_containment(path: str | Path, process_id: int, action: str,
+                       config_digest: str | None = None) -> int:
+    """Note that a response action was taken, for loop detection.
+
+    Only the pid, the action name, and the time are stored. That is enough to spot
+    "this pid keeps getting contained", which is the shape of an attacker using the
+    defender as a weapon, and it stores nothing about the process itself.
+    """
+    if isinstance(process_id, bool) or not isinstance(process_id, int) or process_id <= 0:
+        raise ValueError("process_id must be a positive integer")
+    if not str(action).strip():
+        raise ValueError("action must not be empty")
+    connection = _connect(path)
+    try:
+        cursor = connection.execute(
+            "INSERT INTO containments(created_at, timestamp, process_id, action, config_digest) "
+            "VALUES(?, ?, ?, ?, ?)",
+            (datetime.now(timezone.utc).isoformat(timespec="seconds"),
+             time.time(), process_id, str(action)[:64], config_digest),
+        )
+        connection.commit()
+        return int(cursor.lastrowid or 0)
+    finally:
+        connection.close()
+
+
+def list_containments(path: str | Path, limit: int = 200) -> list[dict]:
+    """Recent containment records, newest first."""
+    connection = _connect(path)
+    try:
+        rows = connection.execute(
+            "SELECT timestamp, process_id, action, config_digest FROM containments "
+            "ORDER BY timestamp DESC LIMIT ?", (max(1, int(limit)),)).fetchall()
+    finally:
+        connection.close()
+    return [{"timestamp": row[0], "process_id": row[1], "action": row[2],
+             "config_digest": row[3]} for row in rows]

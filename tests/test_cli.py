@@ -357,3 +357,109 @@ def test_main_module_entry_point():
     with pytest.raises(SystemExit) as exit_info:
         runpy.run_module("cabid", run_name="__main__", alter_sys=True)
     assert exit_info.value.code in (0, 2)
+
+
+# --- respond: planning and the apply gate ------------------------------------
+
+def _chain_report(tmp_path, *rule_ids, sufficient=True):
+    """Write a small report file with the given rule findings on pid 401."""
+    from cabid.response import build_plan
+
+    report = {
+        "status": "SUSPICIOUS",
+        "anomaly_score": 0.7,
+        "score_semantics": "heuristic score; not a calibrated probability",
+        "completeness": {"completeness": 1.0 if sufficient else 0.5,
+                         "telemetry_sufficient": sufficient,
+                         "missing_event_types": [] if sufficient else ["process_exit"]},
+        "rules": {"findings": [
+            {"rule_id": rule_id, "severity": "high", "process_ids": [401],
+             "title": rule_id, "description": "", "start_timestamp": 1.0}
+            for rule_id in rule_ids]},
+        "tree": {"findings": [], "common_edges": []},
+        "entities": {"top_entities": []},
+        "policy": {"findings": []},
+    }
+    path = tmp_path / "report.json"
+    path.write_text(json.dumps(report), encoding="utf-8")
+    return path, build_plan(report)
+
+
+def test_respond_plans_from_a_report_file(tmp_path, capsys):
+    path, plan = _chain_report(tmp_path, "shell-from-service", "download-then-exec")
+    assert main(["respond", str(path)]) == 0
+    out = capsys.readouterr().out
+    assert "CABID response plan" in out
+    assert "suspend_process" in out
+    assert "Nothing has been executed" in out
+
+
+def test_respond_json_output_is_a_plan(tmp_path, capsys):
+    path, _ = _chain_report(tmp_path, "shell-from-service", "download-then-exec")
+    assert main(["respond", str(path), "-f", "json"]) == 0
+    plan = json.loads(capsys.readouterr().out)
+    assert plan["format"] == "cabid-response/1"
+    assert plan["plan_digest"]
+
+
+def test_respond_writes_the_plan_next_to_the_report(tmp_path, capsys):
+    path, _ = _chain_report(tmp_path, "shell-from-service", "download-then-exec")
+    destination = tmp_path / "plan.json"
+    assert main(["respond", str(path), "-o", str(destination)]) == 0
+    assert "plan written" in capsys.readouterr().out
+    assert json.loads(destination.read_text())["plan_digest"]
+
+
+def test_respond_rejects_unknown_actions(tmp_path, capsys):
+    path, _ = _chain_report(tmp_path, "shell-from-service")
+    assert main(["respond", str(path), "--allow", "monitor,rm_rf"]) == 2
+    assert "unknown actions" in capsys.readouterr().err
+
+
+def test_respond_allow_list_narrows_the_plan(tmp_path, capsys):
+    path, _ = _chain_report(tmp_path, "shell-from-service", "download-then-exec")
+    assert main(["respond", str(path), "--allow", "monitor", "-f", "json"]) == 0
+    plan = json.loads(capsys.readouterr().out)
+    assert all(d["recommended_action"] == "monitor" for d in plan["decisions"])
+
+
+def test_apply_without_a_plan_file_is_refused(tmp_path, capsys):
+    path, _ = _chain_report(tmp_path, "shell-from-service", "download-then-exec")
+    assert main(["respond", str(path), "--apply"]) == 2
+    assert "does not exist" in capsys.readouterr().err
+
+
+def test_apply_without_confirm_is_refused(tmp_path, capsys):
+    path, plan = _chain_report(tmp_path, "shell-from-service", "download-then-exec")
+    (tmp_path / "report.response.json").write_text(json.dumps(plan), encoding="utf-8")
+    assert main(["respond", str(path), "--apply"]) == 2
+    assert "refusing to apply without --confirm" in capsys.readouterr().err
+
+
+def test_apply_with_a_wrong_digest_is_refused(tmp_path, capsys):
+    path, plan = _chain_report(tmp_path, "shell-from-service", "download-then-exec")
+    (tmp_path / "report.response.json").write_text(json.dumps(plan), encoding="utf-8")
+    assert main(["respond", str(path), "--apply", "--confirm", "0" * 64]) == 2
+    assert "does not match this plan" in capsys.readouterr().err
+
+
+def test_dry_run_needs_no_confirmation_and_touches_nothing(tmp_path, capsys):
+    path, plan = _chain_report(tmp_path, "shell-from-service", "download-then-exec")
+    (tmp_path / "report.response.json").write_text(json.dumps(plan), encoding="utf-8")
+    assert main(["respond", str(path), "--apply", "--dry-run"]) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result["executed"] is False
+    assert not (tmp_path / "report.response-audit.jsonl").exists()
+
+
+def test_apply_writes_an_audit_trail(tmp_path, capsys):
+    path, plan = _chain_report(tmp_path, "shell-from-service", "download-then-exec",
+                               sufficient=False)
+    (tmp_path / "report.response.json").write_text(json.dumps(plan), encoding="utf-8")
+    audit = tmp_path / "audit.jsonl"
+    assert main(["respond", str(path), "--apply", "--confirm", plan["plan_digest"],
+                 "--audit", str(audit), "-q"]) == 0
+    assert audit.exists()
+    entries = [json.loads(line) for line in audit.read_text().splitlines()]
+    assert entries[0]["event"] == "plan_start"
+    assert entries[-1]["event"] == "plan_end"

@@ -217,6 +217,63 @@ jobs:
           assert containers['scope_count'] == 2
           assert containers['collision_count'] == 1
           PY
+      - name: Response plans are gated and audited
+        run: |
+          cabid analyze datasets/synthetic/tree-example.jsonl -o /tmp/plan-report.json
+          cabid respond /tmp/plan-report.json -o /tmp/plan-report.response.json
+          python - <<'PY'
+          import json
+          plan = json.load(open('/tmp/plan-report.response.json'))
+          assert plan['format'] == 'cabid-response/1'
+          assert len(plan['plan_digest']) == 64
+          # Incomplete telemetry must never produce a destructive recommendation.
+          if not plan['based_on']['telemetry_sufficient']:
+              assert all(not d['destructive'] for d in plan['decisions'])
+          assert all(d['blast_radius'] for d in plan['decisions'])
+          gates = {g['gate'] for g in plan['gates']}
+          assert {'protected_process', 'kill_chain_corroboration',
+                  'telemetry_sufficiency', 'plan_budget', 'containment_loop'} <= gates
+          PY
+      - name: Applying without a digest is refused
+        run: |
+          if cabid respond /tmp/plan-report.json --apply 2>/tmp/no-confirm.err; then
+            echo "applied without --confirm: the gate is broken"; exit 1
+          fi
+          grep -q "refusing to apply without --confirm" /tmp/no-confirm.err
+          echo "confirm gate held"
+      - name: An edited plan is refused before anything runs
+        run: |
+          python - <<'PY'
+          import json
+          path = '/tmp/plan-report.response.json'
+          plan = json.load(open(path))
+          if plan['decisions']:
+              plan['decisions'][0]['recommended_action'] = 'kill_process'
+              plan['decisions'][0]['destructive'] = True
+          else:
+              plan['based_on']['anomaly_score'] = 0.99
+          json.dump(plan, open(path, 'w'))
+          PY
+          if cabid respond /tmp/plan-report.json --apply --dry-run 2>/tmp/tamper.err; then
+            echo "tampered plan accepted: the digest is not binding"; exit 1
+          fi
+          grep -q "edited after review" /tmp/tamper.err
+          echo "digest binding held"
+      - name: Dry run and audit trail
+        run: |
+          cabid respond /tmp/plan-report.json -o /tmp/plan-report.response.json -q
+          cabid respond /tmp/plan-report.json --apply --dry-run > /tmp/dry.json
+          python -c "import json;d=json.load(open('/tmp/dry.json'));assert d['executed'] is False"
+          DIGEST=$(python -c "import json;print(json.load(open('/tmp/plan-report.response.json'))['plan_digest'])")
+          cabid respond /tmp/plan-report.json --apply --confirm "$DIGEST"             --audit /tmp/plan-audit.jsonl --quarantine-dir /tmp/q -q
+          python - <<'PY'
+          import json
+          entries = [json.loads(line) for line in open('/tmp/plan-audit.jsonl')]
+          assert entries[0]['event'] == 'plan_start'
+          assert entries[-1]['event'] == 'plan_end'
+          assert all(e['format'] == 'cabid-audit/1' for e in entries)
+          print('audit trail ok:', len(entries), 'entries')
+          PY
       - name: Baseline drift suggestions
         run: |
           cabid build-baseline datasets/synthetic/example.jsonl datasets/synthetic/example.jsonl \

@@ -66,6 +66,22 @@
 - STIX indicators use `pattern_type: cabid-heuristic` and are not sweeppable
   IOCs. Confidence values are severity mappings, not measurements, and the bundle
   is a triage hint, not an attribution.
+- Containment plans are gated on kill-chain corroboration, not on the anomaly score.
+  A single loud rule can never take a process down, which also means genuine
+  single-signal intrusions are never contained automatically.
+- The executor can send `SIGSTOP` and `SIGKILL` and nothing else. It cannot isolate a
+  host, block an address, or disable an account; it prints those commands instead. It
+  cannot delete files, and quarantine copies rather than moves.
+- `suspend_process` is reversible but not harmless: the process is down until
+  someone resumes it, and CABID never resumes it automatically.
+- The kill-chain phase mapping is a hand-written table of observed shapes. It says
+  nothing about intent and has not been validated against real intrusions.
+- Containment is remembered (pid, action, time) so a loop can be detected. After
+  three containments of the same pid the plan escalates instead of acting again —
+  which also means a genuinely compromised process that keeps returning needs a
+  human, not another round of `suspend_process`.
+- **The executor has only ever been run against pids the test suite owns.** It has
+  never contained anything on a real host.
 - **There is no real-host benchmark.** Every published number comes from synthetic
   fixtures in `datasets/synthetic/`. Precision, recall, and FPR against real
   enterprise telemetry are unknown. A green synthetic benchmark tells you the code

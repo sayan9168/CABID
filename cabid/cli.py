@@ -21,6 +21,8 @@ from .ingest import normalize_many, read_jsonl
 from .normalize import EventError
 from .policy import PolicyError, evaluate_policy, load_policy
 from .rules import RuleError, load_rules
+from .executor import ExecutionError, dry_run, execute_plan
+from .response import ACTIONS, ResponseError, build_plan, render_plan, write_plan
 from .sigma import SigmaError, import_sigma
 from .stix import build_bundle, write_bundle
 from .signature import SealError, seal_report, sign_file, verify_file
@@ -182,6 +184,33 @@ def _build_parser() -> argparse.ArgumentParser:
     drift.add_argument("--min-support", type=int, default=2,
                        help="sessions that must agree before a suggestion is made (default: 2)")
     drift.add_argument("--quiet", "-q", action="store_true")
+
+    respond = sub.add_parser(
+        "respond",
+        help="build a containment plan from a report, or apply one (human gated)")
+    respond.add_argument("report", help="a JSON report from `cabid analyze`")
+    respond.add_argument("--output", "-o", help="write the plan (JSON) here instead of stdout")
+    respond.add_argument("--format", "-f", choices=("text", "json"), default="text")
+    respond.add_argument("--allow", metavar="ACTION[,ACTION...]",
+                         help="restrict which actions a plan may recommend "
+                              f"(available: {', '.join(sorted(ACTIONS))})")
+    respond.add_argument("--max-destructive", type=int, default=3,
+                         help="at most this many destructive actions per plan (default: 3)")
+    respond.add_argument("--history-db", metavar="DB",
+                         help="history database used to detect containment loops")
+    respond.add_argument("--apply", action="store_true",
+                         help="execute a plan's non-emitted actions (requires --confirm)")
+    respond.add_argument("--confirm", metavar="PLAN_DIGEST",
+                         help="the plan_digest printed by `cabid respond`")
+    respond.add_argument("--dry-run", action="store_true",
+                         help="with --apply, report what would happen without doing it")
+    respond.add_argument("--quarantine-dir", metavar="DIR",
+                         help="write evidence copies here (snapshot/quarantine)")
+    respond.add_argument("--file", action="append", metavar="PATH",
+                         help="a file to quarantine with a quarantine_file decision")
+    respond.add_argument("--audit", metavar="PATH",
+                         help="audit trail for --apply (default: alongside the report)")
+    respond.add_argument("--quiet", "-q", action="store_true")
 
     doctor = sub.add_parser("doctor", help="check environment, telemetry sources and configuration")
     doctor.add_argument("--input", help="optional JSONL file to validate")
@@ -534,6 +563,90 @@ def _cmd_baseline_drift(args) -> int:
     return 0
 
 
+def _cmd_respond(args) -> int:
+    report_path = Path(args.report)
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+
+    if args.apply:
+        return _apply_plan(args, report_path, report)
+
+    allowed = None
+    if args.allow:
+        allowed = tuple(part.strip() for part in args.allow.split(",") if part.strip())
+        unknown = sorted(set(allowed) - set(ACTIONS))
+        if unknown:
+            raise ResponseError(f"unknown actions: {', '.join(unknown)}")
+    history = _containment_history(args.history_db) if args.history_db else None
+    plan = build_plan(report, allowed_actions=allowed, max_actions=args.max_destructive,
+                      known_containments=history)
+    if args.output:
+        destination = write_plan(plan, args.output)
+        if not args.quiet:
+            if args.format == "json":
+                sys.stdout.write(json.dumps(plan, indent=2, sort_keys=True) + "\n")
+            else:
+                sys.stdout.write(render_plan(plan))
+            sys.stdout.write(f"\nCABID: plan written to {destination}\n")
+    elif args.format == "json":
+        sys.stdout.write(json.dumps(plan, indent=2, sort_keys=True) + "\n")
+    else:
+        sys.stdout.write(render_plan(plan))
+    return 0
+
+
+def _containment_history(path: str) -> list[dict]:
+    """Prior containments recorded in the history database's response table."""
+    from .history import HistoryError, list_containments
+
+    try:
+        return list_containments(path)
+    except HistoryError as exc:
+        raise ResponseError(str(exc)) from exc
+
+
+def _apply_plan(args, report_path: Path, report: dict) -> int:
+    # A plan must be reviewed as a file: applying one from memory defeats the
+    # point of the digest, and there is nothing to compare against on disk.
+    plan_path = report_path.with_suffix(".response.json")
+    if not plan_path.is_file():
+        raise ResponseError(
+            f"{plan_path} does not exist; run `cabid respond {report_path} -o {plan_path}` "
+            "and review it before applying")
+    plan = json.loads(plan_path.read_text(encoding="utf-8"))
+    audit_path = Path(args.audit) if args.audit else report_path.with_suffix(".response-audit.jsonl")
+
+    if args.dry_run:
+        result = dry_run(plan)
+        sys.stdout.write(json.dumps(result, indent=2, sort_keys=True) + "\n")
+        return 0
+
+    if not args.confirm:
+        raise ResponseError(
+            "refusing to apply without --confirm <plan_digest>; "
+            f"the plan is {plan.get('plan_digest')}")
+    result = execute_plan(plan, args.confirm, audit_path,
+                          quarantine_dir=args.quarantine_dir, file_paths=args.file)
+    _record_containments(args, result, report)
+    if args.format == "json" or not args.quiet:
+        sys.stdout.write(json.dumps(result, indent=2, sort_keys=True) + "\n")
+    return 0
+
+
+def _record_containments(args, result: dict, report: dict) -> None:
+    """Remember what was contained so a loop can be detected next time."""
+    from .history import record_containment
+
+    path = args.history_db or DEFAULT_DB
+    for step in result.get("steps") or []:
+        if step.get("status") in {"sent", "quarantined", "captured"}:
+            try:
+                record_containment(path, step["process_id"], step["action"],
+                                   report.get("config_digest"))
+            except ValueError:
+                # History is a convenience, not a precondition for responding.
+                continue
+
+
 def _cmd_init_config(args) -> int:
     destination = Path(args.output)
     if destination.exists() and not args.force:
@@ -615,11 +728,14 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_build_baseline(args)
         if args.command == "baseline-drift":
             return _cmd_baseline_drift(args)
+        if args.command == "respond":
+            return _cmd_respond(args)
         if args.command == "init-config":
             return _cmd_init_config(args)
         raise ValueError(f"unknown command: {args.command}")
     except (OSError, EventError, ConfigError, PolicyError, HistoryError, IngestError,
-            FilterError, RuleError, SealError, SigmaError, json.JSONDecodeError, ValueError) as exc:
+            FilterError, RuleError, SealError, SigmaError, ResponseError, ExecutionError,
+            json.JSONDecodeError, ValueError) as exc:
         return _fail(str(exc))
 
 
