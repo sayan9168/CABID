@@ -691,3 +691,94 @@ def test_fleet_cli_compare_reports_a_regression(tmp_path, capsys):
                  "--current", f"web-01={after}"]) == 0
     report = json.loads(capsys.readouterr().out)
     assert report["worsened"][0]["host"] == "web-01"
+
+
+def test_alert_cli_defaults_to_a_dry_run(tmp_path, capsys, monkeypatch):
+    monkeypatch.delenv("CABID_SLACK_WEBHOOK", raising=False)
+    report = tmp_path / "r.json"
+    report.write_text(json.dumps({"status": "HIGH_RISK", "anomaly_score": 0.9,
+                                  "event_count": 100,
+                                  "reasons": [{"code": "temporal_rate_or_burst",
+                                               "detail": "rate exceeded"}]}),
+                      encoding="utf-8")
+    assert main(["alert", str(report), "--channel", "slack", "--host", "web-01"]) == 0
+    receipt = json.loads(capsys.readouterr().out)
+    assert receipt["dry_run"] is True
+    assert receipt["sent"] == 1
+    assert "HIGH_RISK" in receipt["preview"][0]["text"]
+
+
+def test_alert_cli_rejects_an_unknown_report_file(tmp_path, capsys):
+    assert main(["alert", str(tmp_path / "absent.json"), "--channel", "slack"]) == 1
+    assert "error" in capsys.readouterr().err
+
+
+def test_alert_cli_rejects_a_non_object_report(tmp_path, capsys):
+    report = tmp_path / "r.json"
+    report.write_text("[]", encoding="utf-8")
+    assert main(["alert", str(report), "--channel", "slack"]) == 1
+    assert "JSON object" in capsys.readouterr().err
+
+
+def test_alert_cli_state_file_persists_suppression(tmp_path, capsys, monkeypatch):
+    monkeypatch.delenv("CABID_SLACK_WEBHOOK", raising=False)
+    report = tmp_path / "r.json"
+    report.write_text(json.dumps({"status": "HIGH_RISK", "anomaly_score": 0.9,
+                                  "event_count": 100,
+                                  "reasons": [{"code": "temporal_rate_or_burst"}]}),
+                      encoding="utf-8")
+    state = tmp_path / "state.json"
+    args = ["alert", str(report), "--channel", "slack", "--host", "h", "--state", str(state)]
+    # With no destination, delivery fails but the receipt records it and the command
+    # itself succeeds; a failed channel is an operational fact, not a CLI error.
+    assert main([*args, "--send"]) == 0
+    failed = json.loads(capsys.readouterr().out)
+    assert failed["sent"] == 0
+    assert failed["errors"]
+    assert not state.exists() or json.loads(state.read_text(encoding="utf-8"))["total_sent"] == 0
+    assert main(args) == 0
+    receipt = json.loads(capsys.readouterr().out)
+    assert receipt["dry_run"] is True
+    assert receipt["preview"]
+
+
+def test_alert_cli_persists_state_and_suppresses_on_the_next_run(tmp_path, capsys, monkeypatch):
+    monkeypatch.setenv("CABID_WEBHOOK_URL", "https://example.com/hook")
+    monkeypatch.setattr("cabid.alerting.UrllibTransport.post_json",
+                        lambda self, url, payload, timeout: 200)
+    report = tmp_path / "r.json"
+    report.write_text(json.dumps({"status": "HIGH_RISK", "anomaly_score": 0.9,
+                                  "event_count": 100,
+                                  "reasons": [{"code": "temporal_rate_or_burst"}]}),
+                      encoding="utf-8")
+    state = tmp_path / "state.json"
+    args = ["alert", str(report), "--channel", "webhook", "--host", "h",
+            "--state", str(state), "--send"]
+    assert main(args) == 0
+    assert json.loads(capsys.readouterr().out)["sent"] == 1
+    assert main(args) == 0
+    assert json.loads(capsys.readouterr().out)["suppressed"]["duplicate_within_window"] == 1
+
+
+def test_alert_cli_sends_with_a_fake_env_destination(tmp_path, capsys, monkeypatch):
+    sent = {}
+
+    def fake_post(self, url, payload, timeout):
+        sent["url"] = url
+        sent["payload"] = payload
+        return 200
+
+    monkeypatch.setenv("CABID_WEBHOOK_URL", "https://example.com/hook")
+    monkeypatch.setattr("cabid.alerting.UrllibTransport.post_json", fake_post)
+    report = tmp_path / "r.json"
+    report.write_text(json.dumps({"status": "SUSPICIOUS", "anomaly_score": 0.6,
+                                  "event_count": 10,
+                                  "reasons": [{"code": "telemetry_gap"}]}),
+                      encoding="utf-8")
+    output = tmp_path / "receipt.json"
+    assert main(["alert", str(report), "--channel", "webhook", "--host", "h",
+                 "--send", "--output", str(output)]) == 0
+    receipt = json.loads(output.read_text(encoding="utf-8"))
+    assert receipt["sent"] == 1
+    assert sent["payload"]["reason_codes"] == ["telemetry_gap"]
+    assert "https://example.com/hook" not in output.read_text(encoding="utf-8")

@@ -23,6 +23,14 @@ from .calibrate import (
 from .config import ConfigError, config_template, load_config
 from .corpus import CorpusError, catalogue as corpus_catalogue, fetch as corpus_fetch
 from .detector import analyze, analyze_windows, explain_score, render_score_explanation
+from .alerting import (
+    CHANNELS as ALERT_CHANNELS,
+    AlertError,
+    load_state as load_alert_state,
+    send as send_alerts,
+    send_from_stream_report,
+    write_state as write_alert_state,
+)
 from .filters import FilterError, filter_events
 from .fleet import (
     FleetError,
@@ -237,6 +245,29 @@ def _build_parser() -> argparse.ArgumentParser:
     corpus.add_argument("--refresh", action="store_true", help="re-download even if cached")
     corpus.add_argument("--offline", action="store_true", help="never touch the network")
 
+    alert = sub.add_parser(
+        "alert",
+        help="send findings to Slack, Discord, email or a webhook (dry-run by default)")
+    alert.add_argument("reports", nargs="+", help="report JSON files (session or stream)")
+    alert.add_argument("--channel", "-C", choices=ALERT_CHANNELS, required=True)
+    alert.add_argument("--host", help="host label recorded in the alert")
+    alert.add_argument("--minimum", choices=("SUSPICIOUS", "HIGH_RISK", "INSUFFICIENT_EVIDENCE"),
+                       default="SUSPICIOUS")
+    alert.add_argument("--quiet-seconds", type=float, default=1800.0,
+                       help="suppress a repeat of the same finding within this window")
+    alert.add_argument("--state", help="JSON file holding suppression state between runs")
+    alert.add_argument("--max-per-run", type=int, default=20)
+    alert.add_argument("--dashboard-url", help="link included in the alert text")
+    alert.add_argument("--email-from", help="sender address (email channel)")
+    alert.add_argument("--email-to", help="recipient address (email channel)")
+    alert.add_argument("--smtp-host", help="SMTP host (email channel)")
+    alert.add_argument("--smtp-port", type=int, default=587)
+    alert.add_argument("--smtp-user", help="SMTP username (email channel)")
+    alert.add_argument("--no-tls", action="store_true", help="skip STARTTLS (discouraged)")
+    alert.add_argument("--send", action="store_true",
+                       help="actually deliver; without this the command is a dry run")
+    alert.add_argument("--output", "-o", help="write the receipt as JSON")
+
     fleet = sub.add_parser(
         "fleet",
         help="aggregate or compare reports across many hosts")
@@ -353,6 +384,81 @@ def _load_analyze_events(args) -> tuple[list[dict], dict]:
         events = read_jsonl(args.input[0])
     events, window = filter_events(events, getattr(args, "since", None), getattr(args, "until", None))
     return events, {"sources": sources_block, "time_filter": window}
+
+
+def _cmd_alert(args) -> int:
+    reports = []
+    for raw in args.reports:
+        path = Path(raw)
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            print(f"error: {path}: {exc}", file=sys.stderr)
+            return 1
+        if not isinstance(payload, dict):
+            print(f"error: {path}: report must be a JSON object", file=sys.stderr)
+            return 1
+        reports.append(payload)
+    try:
+        state = load_alert_state(args.state) if args.state else None
+    except AlertError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+    common = dict(channel=args.channel, host=args.host, minimum=args.minimum,
+                  quiet_seconds=args.quiet_seconds, state=state,
+                  max_per_run=args.max_per_run, dashboard_url=args.dashboard_url,
+                  email_from=args.email_from, email_to=args.email_to,
+                  smtp_host=args.smtp_host, smtp_port=args.smtp_port,
+                  smtp_user=args.smtp_user, smtp_tls=not args.no_tls)
+    try:
+        if args.send:
+            receipts = []
+            for report in reports:
+                if "windows_scored" in report:
+                    receipts.append(send_from_stream_report(report, **common))
+                else:
+                    receipts.append(send_alerts([report], **common))
+                common["state"] = state
+            receipt = receipts[0] if len(receipts) == 1 else {
+                "format": "cabid-alert-receipt/1",
+                "aggregate": True,
+                "receipts": receipts,
+                "sent": sum(item.get("sent", 0) for item in receipts),
+                "channel": args.channel,
+            }
+        else:
+            # Dry run is the default so a first integration cannot page anyone. It
+            # previews the exact payload and still exercises suppression.
+            batched = []
+            for report in reports:
+                if "windows_scored" in report:
+                    batched.append(send_from_stream_report(
+                        report, dry_run=True, **common))
+                else:
+                    batched.append(send_alerts([report], dry_run=True, **common))
+                common["state"] = state
+            receipt = batched[0] if len(batched) == 1 else {
+                "format": "cabid-alert-receipt/1",
+                "aggregate": True,
+                "receipts": batched,
+                "sent": sum(item.get("sent", 0) for item in batched),
+                "channel": args.channel,
+                "dry_run": True,
+            }
+    except AlertError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+    if args.state and state is not None and args.send:
+        write_alert_state(state, args.state)
+    text = json.dumps(receipt, indent=2, sort_keys=True) + "\n"
+    if args.output:
+        destination = Path(args.output)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_text(text, encoding="utf-8")
+    sys.stdout.write(text)
+    return 0
 
 
 def _parse_host_pairs(items: list[str]) -> list[tuple[str, str]]:
@@ -984,6 +1090,8 @@ def main(argv: list[str] | None = None) -> int:
                 report_path.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8")
             print(json.dumps(summary, indent=2, sort_keys=True))
             return 0
+        if args.command == "alert":
+            return _cmd_alert(args)
         if args.command == "fleet":
             return _cmd_fleet(args)
         if args.command == "analyze-stream":
