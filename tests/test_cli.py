@@ -4,6 +4,120 @@ import pytest
 
 from cabid.cli import main
 
+_KINDS = ("process_start", "process_exec", "file_write", "network_connect",
+          "process_exit", "heartbeat")
+
+
+def _make_events(count: int, *, start: float = 1000.0, step: float = 1.0) -> list[dict]:
+    return [{
+        "timestamp": start + index * step,
+        "event_type": _KINDS[index % len(_KINDS)],
+        "process_id": 100 + index % 20,
+        "parent_process_id": 1,
+        "process_name": f"svc-{index % 4}",
+        "executable": f"/usr/bin/svc-{index % 4}",
+        "target": "",
+        "source": "test",
+    } for index in range(count)]
+
+
+def _make_session(name: str, events: int = 10, duration: float = 1000.0,
+                  seconds_offset: float = 0.0) -> tuple[str, list[dict]]:
+    events = max(events, 2)
+    step = duration / events
+    return name, [{
+        "timestamp": 1000.0 + seconds_offset + index * step,
+        "event_type": _KINDS[index % len(_KINDS)],
+        "process_id": 100 + index,
+        "parent_process_id": 1,
+        "process_name": f"{name}-{index % 3}",
+        "executable": f"/usr/bin/{name}-{index % 3}",
+        "target": "",
+        "source": "test",
+    } for index in range(events)]
+
+
+def _make_sessions(count: int, prefix: str = "s", **kwargs
+                   ) -> list[tuple[str, list[dict]]]:
+    return [_make_session(f"{prefix}-{index:03d}",
+                          seconds_offset=index * 1000.0, **kwargs)
+            for index in range(count)]
+
+
+def _cli_session(index: int, *, rate: float = 8.0, duration: float = 60.0
+                 ) -> tuple[str, list[dict]]:
+    kinds = _KINDS
+    count_ev = max(1, int(rate * duration / 60.0))
+    events = [{
+        "timestamp": (1000.0 + index * 1000 + step * (duration / count_ev)
+                      + (((index * 7919 + step * 104729) % 1000) / 1000.0) * 0.05),
+        "event_type": kinds[step % len(kinds)],
+        "process_id": 100 + index,
+        "parent_process_id": 1,
+        "process_name": f"svc-{step % 3}",
+        "executable": f"/usr/bin/svc-{step % 3}",
+        "target": "",
+        "source": "test",
+    } for step in range(count_ev)]
+    return f"session-{index:03d}", events
+
+
+def _cli_benign(count: int = 40, **kwargs) -> list[tuple[str, list[dict]]]:
+    sessions = []
+    for index in range(count):
+        varied = dict(kwargs)
+        varied.setdefault("rate", 20.0 + (index % 7) * 12.0)
+        varied.setdefault("duration", 90.0 + (index % 5) * 45.0)
+        sessions.append(_cli_session(index, **varied))
+    return sessions
+
+
+# Small ADFA-LD-style fixtures for the benchmark-real CLI test.
+_CLI_TRAINING = [
+    "3 4 6 3 4 6 3 4 6",
+    "3 5 4 6 3 5 4 6 3 5",
+    "4 6 3 4 6 3 4 6 3 4",
+    "5 4 4 6 3 5 4 6 3 4",
+    "3 4 5 6 3 4 5 6 3 4",
+    "4 5 3 6 4 5 3 6 4 5",
+    "3 4 6 3 4 6 5 5 4 6",
+    "4 4 6 3 3 5 4 6 3 4",
+]
+_CLI_VALIDATION = [
+    "3 4 6 3 4 6 3 4 6 4",
+    "5 4 6 3 5 4 6 3 5 4",
+    "4 6 3 4 6 3 4 6 3 4",
+    "3 5 4 6 3 5 4 6 3 5",
+]
+_CLI_ATTACK = {
+    "Adduser_1": ["120 102 102 102 102 206 102 102 102 102"],
+    "Hydra_SSH_1": ["102 102 102 102 102 102 102 102 102 102"],
+    "Web_Shell_1": ["120 11 102 4 5 102 4 5 102 4"],
+}
+
+
+def _cli_write_tree(root) -> object:
+    from pathlib import Path
+
+    root = Path(root)
+    base = root / "ADFA-LD"
+    for directory, contents in (("Training_Data_Master", _CLI_TRAINING),
+                                ("Validation_Data_Master", _CLI_VALIDATION)):
+        folder = base / directory
+        folder.mkdir(parents=True)
+        prefix = "UTD" if directory.startswith("Training") else "UVD"
+        for index, body in enumerate(contents, start=1):
+            (folder / f"{prefix}-{index:04d}.txt").write_text(body + "\n",
+                                                                encoding="utf-8")
+    attack_root = base / "Attack_Data_Master"
+    for technique, traces in _CLI_ATTACK.items():
+        folder = attack_root / technique
+        folder.mkdir(parents=True)
+        for index, body in enumerate(traces, start=1):
+            (folder / f"UAD-{technique}-{index}.txt").write_text(body + "\n",
+                                                                  encoding="utf-8")
+    return base
+
 
 def test_benchmark_cli_writes_json(tmp_path):
     output = tmp_path / "nested" / "benchmark.json"
@@ -488,9 +602,7 @@ def test_benchmark_real_cli_errors_when_corpus_absent(tmp_path, capsys):
 
 
 def test_benchmark_real_cli_runs_on_extracted_corpus(tmp_path, capsys):
-    from tests.test_realworld import _write_tree
-
-    root = _write_tree(tmp_path / "corpus")
+    root = _cli_write_tree(tmp_path / "corpus")
     output = tmp_path / "out" / "real.json"
     assert main(["benchmark-real", "--corpus-root", str(root), "--output", str(output),
                  "--format", "md"]) == 0
@@ -502,11 +614,9 @@ def test_benchmark_real_cli_runs_on_extracted_corpus(tmp_path, capsys):
 
 def _benign_jsonl(directory, count=25):
     """Write one JSONL file per session: a session is a file, as elsewhere in CABID."""
-    from tests.test_calibrate import _benign
-
     directory.mkdir(parents=True, exist_ok=True)
     paths = []
-    for name, events in _benign(count):
+    for name, events in _cli_benign(count):
         path = directory / f"{name}.jsonl"
         path.write_text("\n".join(json.dumps(event) for event in events) + "\n",
                         encoding="utf-8")
@@ -559,12 +669,11 @@ def test_calibrate_cli_rejects_missing_input(tmp_path, capsys):
 
 def test_validate_baseline_cli_reports_a_verdict(tmp_path, capsys):
     from cabid.baseline import build_profile, write_profile
-    from tests.test_novelty import _sessions
 
-    profile = build_profile(_sessions(40, prefix="fit"), minimum_sessions=3)
+    profile = build_profile(_make_sessions(40, prefix="fit"), minimum_sessions=3)
     profile_path = write_profile(profile, tmp_path / "profile.json")
     sources = []
-    for name, events in _sessions(30, prefix="held"):
+    for name, events in _make_sessions(30, prefix="held"):
         path = tmp_path / f"{name}.jsonl"
         path.write_text("\n".join(json.dumps(event) for event in events) + "\n",
                         encoding="utf-8")
@@ -579,11 +688,10 @@ def test_validate_baseline_cli_reports_a_verdict(tmp_path, capsys):
 
 def test_validate_baseline_cli_errors_on_too_few_sessions(tmp_path, capsys):
     from cabid.baseline import build_profile, write_profile
-    from tests.test_novelty import _sessions
 
-    profile = build_profile(_sessions(40, prefix="fit"), minimum_sessions=3)
+    profile = build_profile(_make_sessions(40, prefix="fit"), minimum_sessions=3)
     profile_path = write_profile(profile, tmp_path / "profile.json")
-    name, events = _sessions(1, prefix="held")[0]
+    name, events = _make_sessions(1, prefix="held")[0]
     source = tmp_path / "one.jsonl"
     source.write_text("\n".join(json.dumps(event) for event in events) + "\n",
                       encoding="utf-8")
@@ -593,13 +701,12 @@ def test_validate_baseline_cli_errors_on_too_few_sessions(tmp_path, capsys):
 
 def test_drift_report_cli_detects_a_rate_change(tmp_path, capsys):
     from cabid.baseline import build_profile, write_profile
-    from tests.test_novelty import _sessions
 
-    profile = build_profile(_sessions(40, prefix="fit", duration=600.0),
+    profile = build_profile(_make_sessions(40, prefix="fit", duration=600.0),
                             minimum_sessions=3)
     profile_path = write_profile(profile, tmp_path / "profile.json")
     sources = []
-    for name, events in _sessions(30, prefix="fast", duration=60.0):
+    for name, events in _make_sessions(30, prefix="fast", duration=60.0):
         path = tmp_path / f"{name}.jsonl"
         path.write_text("\n".join(json.dumps(event) for event in events) + "\n",
                         encoding="utf-8")
@@ -612,10 +719,9 @@ def test_drift_report_cli_detects_a_rate_change(tmp_path, capsys):
 
 
 def test_analyze_stream_cli_reports_throughput(tmp_path, capsys):
-    from tests.test_streaming import _events
 
     source = tmp_path / "stream.jsonl"
-    source.write_text("\n".join(json.dumps(event) for event in _events(120)) + "\n",
+    source.write_text("\n".join(json.dumps(event) for event in _make_events(120)) + "\n",
                       encoding="utf-8")
     output = tmp_path / "out" / "stream.json"
     assert main(["analyze-stream", str(source), "--window-seconds", "60",
