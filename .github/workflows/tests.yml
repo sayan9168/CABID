@@ -23,7 +23,7 @@ jobs:
       - run: python -m pip install --upgrade pip
       - run: python -m pip install -e '.[test]'
       - name: pyflakes
-        run: pyflakes cabid tests
+        run: pyflakes cabid tests tools
       - name: mypy
         run: mypy cabid
       - name: coverage floor (90%)
@@ -299,7 +299,115 @@ jobs:
           assert report['status'] == 'INSUFFICIENT_EVIDENCE'
           page = urllib.request.urlopen(base + '/').read()
           assert b'CABID' in page
+          graph = json.load(urllib.request.urlopen(
+              base + '/api/graph?dataset=tree-example.jsonl'))
+          assert graph['node_count'] >= 1 and graph['bins']
+          assert b'Process graph' in page and b'Timeline' in page
           httpd.shutdown()
           httpd.server_close()
           print('dashboard ok')
+          PY
+      - name: Calibration, drift and fleet
+        run: |
+          python - <<'PY'
+          import json, os, subprocess, tempfile
+          from pathlib import Path
+          from tests.test_calibrate import _benign
+          from tests.test_novelty import _sessions
+          from cabid.baseline import build_profile, write_profile
+
+          work = Path(tempfile.mkdtemp())
+          sessions = work / 'sessions'
+          sessions.mkdir()
+          paths = []
+          for name, events in _benign(25):
+              path = sessions / f'{name}.jsonl'
+              path.write_text('\n'.join(json.dumps(e) for e in events) + '\n', encoding='utf-8')
+              paths.append(str(path))
+
+          calib = work / 'calibration.json'
+          applied = work / 'config.json'
+          subprocess.run(['cabid', 'calibrate', *paths, '-o', str(calib),
+                          '--apply-to', str(applied)], check=True, capture_output=True)
+          data = json.loads(calib.read_text())
+          assert data['format'] == 'cabid-calibration/1'
+          assert 0 <= data['thresholds']['suspicious'] <= data['thresholds']['high'] <= 1
+
+          profile_path = write_profile(build_profile(_sessions(40, prefix='fit'),
+                                                     minimum_sessions=3),
+                                       work / 'profile.json')
+          held = []
+          for name, events in _sessions(30, prefix='held'):
+              path = work / f'{name}.jsonl'
+              path.write_text('\n'.join(json.dumps(e) for e in events) + '\n', encoding='utf-8')
+              held.append(str(path))
+          result = subprocess.run(['cabid', 'validate-baseline', str(profile_path), *held],
+                                  capture_output=True, text=True)
+          assert result.returncode == 0, result.stderr
+          assert json.loads(result.stdout)['verdict'] in {'SOUND', 'NEEDS_REFIT'}
+
+          report = work / 'host.json'
+          report.write_text(json.dumps({'status': 'HIGH_RISK', 'anomaly_score': 0.9,
+                                        'event_count': 10,
+                                        'completeness': {'completeness': 1.0},
+                                        'reasons': [{'code': 'temporal_rate_or_burst'}]}),
+                            encoding='utf-8')
+          fleet = work / 'fleet.json'
+          expected = work / 'expected.txt'
+          expected.write_text('web-01\nweb-02\n', encoding='utf-8')
+          subprocess.run(['cabid', 'fleet', f'web-01={report}', '--expected', str(expected),
+                          '-o', str(fleet)], check=True, capture_output=True)
+          summary = json.loads(fleet.read_text())
+          assert summary['silent_hosts'] == ['web-02'] and summary['degraded'] is True
+          print('calibration + drift + fleet ok')
+          PY
+      - name: Alerting is dry-run by default and never leaks a secret
+        run: |
+          python - <<'PY'
+          import json, os, subprocess, tempfile
+          from pathlib import Path
+
+          work = Path(tempfile.mkdtemp())
+          report = work / 'report.json'
+          report.write_text(json.dumps({'status': 'HIGH_RISK', 'anomaly_score': 0.9,
+                                        'event_count': 10,
+                                        'reasons': [{'code': 'temporal_rate_or_burst'}]}),
+                            encoding='utf-8')
+          secret = 'https://hooks.slack.com/services/T00/B00/SUPERSECRETTOKEN'
+          env = {**os.environ, 'CABID_SLACK_WEBHOOK': secret}
+          # No --send: must be a dry run that previews the payload.
+          result = subprocess.run(['cabid', 'alert', str(report), '--channel', 'slack',
+                                   '--host', 'web-01'], check=True, capture_output=True,
+                                  text=True, env=env)
+          receipt = json.loads(result.stdout)
+          assert receipt['dry_run'] is True
+          assert receipt['sent'] == 1
+          assert receipt['preview'][0]['payload']['blocks']
+          assert 'SUPERSECRETTOKEN' not in result.stdout
+          print('alerting ok')
+          PY
+      - name: Streaming stays bounded
+        run: |
+          python - <<'PY'
+          import json, os
+          from cabid.streaming import stream
+          from tests.test_streaming import _events
+
+          report = stream(_events(5000), window_seconds=60.0, sample_limit=100)
+          assert report['events_normalized'] == 5000
+          assert report['window_count'] >= 2
+          assert report['sample_events_retained'] == 100
+          assert report['events_per_second'] > 0
+          print('streaming ok')
+          PY
+      - name: Kernel sensor parser and capability check
+        run: |
+          cabid ebpf check || test $? -eq 1
+          cabid ebpf script --output /tmp/cabid-sensor.bt
+          python - <<'PY'
+          from cabid.ebpf import parse_line
+          event = parse_line('exec\t1760000000\t4242\t1\tnginx\t/usr/sbin/nginx')
+          assert event['event_type'] == 'process_exec'
+          assert event['executable'] == '/usr/sbin/nginx'
+          print('kernel sensor parser ok')
           PY

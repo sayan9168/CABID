@@ -1,7 +1,25 @@
 # Limitations and safe-use notes
 
-- CABID analyzes supplied JSONL; it does not install a kernel sensor, eBPF
-  program, audit rule, or background service.
+- CABID analyzes supplied JSONL. It ships a kernel sensor *program* and a parser,
+  but it does not install one, and the shipped bpftrace program has **never been
+  executed against a live kernel** in this repository. See
+  [ebpf-sensor.md](ebpf-sensor.md) for exactly what is and is not verified.
+- **The real-world benchmark does not flatter CABID.** On ADFA-LD it reports a
+  93.8% false-positive rate and an anomaly-score AUC of 0.356 (below chance) with the
+  telemetry gate disabled. Those numbers are published because a benchmark that only
+  reports favourable results is not a benchmark. The corpus is 2013 syscall traces
+  with no timestamps, pids, or paths, so it cannot exercise ancestry, lifecycle, or
+  rate detection at all — see [realworld-benchmark.md](realworld-benchmark.md).
+- Calibration makes the false-positive budget explicit; it does not improve the
+  underlying score. If the score cannot separate the classes, no threshold will.
+- Baseline validation and drift judge the *model*, not the host. A statistically
+  sound baseline can still be defeated by activity that resembles it.
+- Fleet aggregation reads reports; it does not collect them. Silent hosts are
+  reported but cannot be diagnosed from the report that does not exist.
+- Alert suppression is per-process unless state is persisted, and the state file has
+  no locking. Two concurrent notifiers sharing one state file can both deliver.
+- Streaming windows split causal chains. A chain spanning a window boundary may be
+  missed, and per-window verdicts are weaker evidence than one session verdict.
 - The score is a transparent heuristic, not a probability or a claim of malware
   attribution. Weights are hand-set defaults, not fitted parameters.
 - Parent-process checks are window-local. A parent may legitimately have started
@@ -18,8 +36,9 @@
 - Policy findings are operator-defined patterns. `file_write` from auditd means a
   write-capable open, not proof that bytes changed.
 - Suppressing a reason code changes governance output, not detection behaviour.
-- Thresholds are not trained or calibrated. Do not use this prototype as the sole
-  security control or for automated blocking.
+- Default thresholds ship hand-set. `cabid calibrate` derives them from benign
+  sessions, but the shipped defaults remain uncalibrated constants. Do not use this
+  prototype as the sole security control or for automated blocking.
 - Watch mode and the procfs collector are polling designs: they add latency and
   can miss short-lived activity. They are not real-time sensors.
 - The dashboard has no authentication and binds to loopback by default. Do not

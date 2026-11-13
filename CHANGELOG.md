@@ -7,6 +7,75 @@ All notable changes to CABID are documented here. The format follows
 > **Status:** alpha research prototype. Minor versions may change scoring
 > behaviour; every report carries a `config_digest` so results remain traceable.
 
+## [0.8.0] — 2026-11-13
+
+Eight features, one theme: make CABID's claims measurable instead of asserted.
+Where a feature could not be verified in this environment, the docs say so
+explicitly rather than implying it was.
+
+### Added
+
+- **Real-world benchmark** (`cabid/corpus.py`, `cabid/adfa.py`, `cabid/realworld.py`,
+  `cabid benchmark-real`). Runs on ADFA-LD: 5,951 real syscall traces, 746 attack.
+  Corpora are fetched on demand and verified against a pinned SHA-256 instead of
+  vendored. Reports precision/recall/FPR with Wilson 95% intervals, a threshold-free
+  ROC-AUC, and a gate-disabled ablation.
+  - The published result is **unfavourable and deliberate**: 93.8% FPR on ADFA-LD,
+    and an anomaly-score AUC of 0.356 (below chance) once the telemetry gate is
+    disabled. The ablation explains the mechanism — attack traces are
+    `socketcall`-dominated, so they exhibit *fewer* event classes and the
+    completeness gate reads that as worse telemetry. 18.1% of attack traces map to
+    no CABID event class at all.
+- **Threshold calibration** (`cabid/calibrate.py`, `cabid calibrate`). Replaces
+  hand-picked constants with a percentile floor over benign sessions, plus
+  median/MAD rate limits. The implied false-positive budget is stated explicitly.
+  Refuses to guess below 20 scoreable sessions, on empty sessions, or when the
+  reference set has no spread.
+- **Baseline validation and drift** (`cabid/novelty.py`, `cabid validate-baseline`,
+  `cabid drift-report`). Two-sample KS with asymptotic critical values, an exact
+  binomial test for classification flips, a three-state verdict on the *baseline*,
+  and drift reporting that proposes — never applies — profile updates.
+- **Fleet view** (`cabid/fleet.py`, `cabid fleet`). Aggregates and compares reports
+  across hosts, accepts mixed report shapes, and treats a **silent host as a
+  finding**: `--expected` lists hosts that did not report and marks the fleet
+  degraded above a 10% silence ratio.
+- **Alerting** (`cabid/alerting.py`, `cabid alert`). Slack, Discord, email, and
+  generic webhooks, standard library only. Four suppression stages (severity floor,
+  dedup, per-fingerprint rate limit, run budget), all counted in the receipt.
+  Dry-run is the default. Credentials are environment-only and redacted everywhere.
+- **Streaming analysis** (`cabid/streaming.py`, `cabid analyze-stream`). Windowed
+  scoring with bounded memory: **22.9 MB peak at 1,000,000 events**, against 1,115 MB
+  for one-shot analysis, at comparable throughput.
+- **Kernel sensor** (`cabid/ebpf.py`, `cabid ebpf check|script|parse`). A bpftrace
+  program for process, network, and file events, with a strict parser and a
+  capability check that reports every failed prerequisite. **Never executed against
+  a live kernel in this environment** — see `docs/ebpf-sensor.md`.
+- **Interactive dashboard** (`cabid/server.py`, `cabid/dashboard.html`). Process-graph
+  tab with search, collapse, tooltips, and a pinned detail panel; event-density
+  timeline; name-level filter rollup. Structure is derived server-side at `/api/graph`.
+
+### Changed
+
+- Rule-pack glob matching translates each pattern once instead of on every event.
+  Measured 47k → 55k events/s.
+- Baseline profiles now store `rate_samples`, enabling a real two-sample test.
+- The dashboard's API surface grew two routes; `docs/dashboard.md` lists them.
+
+### Fixed
+
+- Glob caching compared a literal pattern against a truncated prefix, which silently
+  stopped literal rules matching. Caught by an equivalence test against `fnmatch`.
+- The KS statistic advanced one sample at a time and compared ECDF heights mid-tie,
+  reporting 0.333 for identical samples.
+- Rate divergence used a one-sample KS against a single median — degenerate by
+  construction, since an ECDF is always ~0.5 from a step function.
+- Unrounded rates against six-decimal profile rates returned KS = 1.0 for identical
+  workloads.
+- A MAD of `1.7e-13` is truthy, so `scale or fallback` never fired and a derived
+  threshold came out at `6.8e-13`, flagging every session.
+- Linear-interpolated percentiles sit below tied values, so a 99th-percentile floor
+  flagged the bulk of the traffic it was fitted on.
+
 ## [Unreleased]
 
 ### Added

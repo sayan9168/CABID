@@ -46,6 +46,25 @@ CABID combines temporal activity, conservative process ancestry checks, and tele
   both x86_64 and aarch64, with a per-reason `skipped` breakdown
 - Deterministic synthetic benchmark comparing temporal-only, CABID core, and
   baseline-aware models
+- **Real-world benchmark** (`cabid benchmark-real`) on a pinned, checksum-verified
+  public corpus (ADFA-LD: 5,951 traces), reporting precision/recall/FPR with Wilson
+  intervals, a threshold-free ROC-AUC, and a gate-disabled ablation — including the
+  unfavourable result
+- **Data-driven calibration** (`cabid calibrate`): percentile floor plus median/MAD
+  rate limits over benign sessions, with the implied false-positive budget stated
+- **Baseline validation and drift** (`cabid validate-baseline`, `cabid drift-report`):
+  two-sample KS, exact binomial flip test, three-state verdict, proposed (never
+  applied) profile updates
+- **Fleet view** (`cabid fleet`): rank and compare hosts across reports, with silent
+  hosts reported as findings rather than omitted
+- **Alerting** (`cabid alert`): Slack, Discord, email, webhooks; dry-run by default;
+  dedup and rate limiting with every suppression counted
+- **Bounded-memory streaming** (`cabid analyze-stream`): 22.9 MB peak at 1M events
+- **Kernel sensor** (`cabid ebpf`): bpftrace program for process/network/file events
+  with a strict parser and a capability check (program not executed in this repo —
+  see the docs)
+- **Interactive dashboard tabs**: process graph with search/collapse/tooltips,
+  event-density timeline, name-level filters
 - CI-friendly exit codes (`--exit-code`, `--fail-on`), automated tests, GitHub Actions
   with lint, type and coverage (>=90%) gates, and a container image
 
@@ -188,6 +207,87 @@ understand is counted under a reason in `skipped` — a large `unmapped_syscall`
 figure means the stream is only partly understood, not that the host was quiet.
 See docs/auditd-ingestion.md.
 
+## Run the real-world benchmark
+
+The corpus is fetched on demand and verified against a pinned digest; nothing is
+vendored.
+
+```bash
+cabid corpus list                 # pinned digests, licences, caveats
+cabid corpus fetch adfa-ld        # verify + extract + cache
+cabid benchmark-real --corpus-cache ~/.cache/cabid -o results/adfa.json -f md
+```
+
+The published result is deliberately unfavourable: **93.8% false-positive rate**, and
+an anomaly-score AUC of **0.356** (below chance) once the telemetry gate is disabled.
+The report's ablation explains why — attack traces are `socketcall`-dominated, so they
+show *fewer* event classes and the completeness gate reads that as worse telemetry.
+See [docs/realworld-benchmark.md](docs/realworld-benchmark.md). A benchmark that only
+reports favourable numbers is not a benchmark.
+
+## Calibrate thresholds instead of guessing
+
+```bash
+cabid calibrate benign/*.jsonl --output calibration.json --apply-to config.json
+cabid calibrate --compare calibration.json benign/first.jsonl
+```
+
+The 99th percentile of benign scores becomes the `suspicious` floor, so the
+false-positive budget (1%) is stated rather than discovered in production. See
+[docs/calibration.md](docs/calibration.md).
+
+## Validate the baseline, then watch it drift
+
+```bash
+cabid validate-baseline baseline.json withheld/*.jsonl
+cabid drift-report baseline.json recent/*.jsonl
+```
+
+Both judge the *model*, not the host: drift is caused by benign change constantly.
+See [docs/novelty.md](docs/novelty.md).
+
+## Watch a fleet
+
+```bash
+cabid fleet web-01=reports/web-01.json db-01=reports/db-01.json             --expected hosts.txt --format md
+```
+
+Hosts that did not report are listed explicitly and mark the view degraded — the host
+that went dark is often the interesting one. See [docs/fleet.md](docs/fleet.md).
+
+## Alert, without training people to ignore the channel
+
+```bash
+cabid alert report.json --channel slack --host web-01          # dry run: previews payload
+CABID_SLACK_WEBHOOK=... cabid alert report.json --channel slack --host web-01 \
+    --state alert-state.json --send
+```
+
+Dry-run is the default; dedup keys on host + status + reason codes, not score. See
+[docs/alerting.md](docs/alerting.md).
+
+## Stream at lakhs of events per minute
+
+```bash
+cabid analyze-stream sensor.jsonl --window-seconds 60 --output stream.json
+```
+
+Measured: **22.9 MB peak RSS at 1,000,000 events**, versus 1,115 MB for one-shot
+analysis, at comparable throughput — roughly 32× the 10⁵/min requirement. See
+[docs/performance.md](docs/performance.md).
+
+## Read kernel events (with a caveat)
+
+```bash
+cabid ebpf check                                   # can this host run it?
+cabid ebpf script --output cabid-sensor.bt         # review, then run as root
+cabid ebpf parse sensor.log --output events.jsonl
+```
+
+The bpftrace program in this repository has **never been executed against a live
+kernel** in this environment. [docs/ebpf-sensor.md](docs/ebpf-sensor.md) states
+precisely what is and is not verified.
+
 ## Run synthetic benchmark
 
     cabid benchmark --output results/synthetic-benchmark.json --seed 20261113 --per-class 50
@@ -230,6 +330,13 @@ file_write, network_connect, process_exit, heartbeat. See docs/event-schema.md.
 | docs/auditd-ingestion.md | auditd importer scope |
 | docs/linux-collector.md | procfs collector limits |
 | docs/benchmark.md | synthetic benchmark caveats |
+| docs/realworld-benchmark.md | ADFA-LD benchmark: method, the unfavourable result, and why |
+| docs/calibration.md | deriving thresholds from benign sessions |
+| docs/novelty.md | baseline validation and drift tracking |
+| docs/fleet.md | multi-host aggregation, silent-host accounting |
+| docs/alerting.md | delivery channels and suppression |
+| docs/performance.md | measured throughput, bounded memory, the rule-pack fix |
+| docs/ebpf-sensor.md | kernel sensor, and what was never verified |
 | docs/limitations.md | safe-use notes |
 | docs/releasing.md | release checklist and the PyPI trusted-publisher setup |
 | docs/response.md | containment plans, the gates, and why this is not an auto-blocker |
