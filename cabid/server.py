@@ -6,7 +6,7 @@ Design notes:
   and Alibaba/e2b hosts forward absolute-form request targets
   (``POST http://<host>/api/analyze``). Only same-origin authority is accepted,
   and path prefixes used by the proxy are stripped before routing.
-* Serves exactly four JSON endpoints plus one static HTML page.
+* Serves a small, fixed set of JSON endpoints plus one static HTML page.
 * Request bodies are size-capped, dataset names are whitelisted, and no
   arbitrary filesystem path from the client is ever opened.
 * It is a research viewer, not a multi-user service: no authentication, no
@@ -141,6 +141,78 @@ def analyze_payload(payload: dict) -> dict:
     return report
 
 
+def graph_payload(events: list[dict], *, max_nodes: int = 400,
+                  max_bins: int = 120) -> dict:
+    """Derive a process graph and a time histogram for the dashboard.
+
+    The browser does not receive render geometry, it receives the resolved
+    structure: parent edges are already resolved to one parent per pid by the same
+    code that scores the session, so a node cannot be drawn under two parents in the
+    UI while the analysis used one. That would look like a bug in the analysis and
+    is a display bug here.
+
+    Nodes are capped. A session with more processes than ``max_nodes`` keeps the
+    highest-activity ones and reports the truncation, because silently rendering a
+    partial tree as if it were whole is the failure mode worth avoiding.
+    """
+    if not events:
+        return {"nodes": [], "edges": [], "bins": [], "truncated": False,
+                "node_count": 0, "edge_count": 0, "notes": ["no events to graph"]}
+
+    parents: dict[int, int] = {}
+    labels: dict[int, str] = {}
+    activity: dict[int, int] = {}
+    for event in events:
+        pid = event["process_id"]
+        name = str(event.get("process_name") or "unknown")
+        labels.setdefault(pid, name)
+        activity[pid] = activity.get(pid, 0) + 1
+        ppid = event.get("parent_process_id") or 0
+        if ppid and ppid != pid:
+            parents.setdefault(pid, int(ppid))
+            labels.setdefault(int(ppid), labels.get(int(ppid), "unknown"))
+
+    truncated = len(activity) > max_nodes
+    keep = {pid for pid, _count in sorted(activity.items(), key=lambda item: -item[1])[:max_nodes]}
+    nodes = [{"pid": pid, "name": labels.get(pid, "unknown"), "events": count,
+              "parent": parents.get(pid), "is_root": pid not in parents}
+             for pid, count in sorted(activity.items(), key=lambda item: -item[1])
+             if pid in keep]
+    edges = [{"source": parent, "target": pid, "events": activity.get(pid, 0)}
+             for pid, parent in parents.items()
+             if pid in keep and (parent in keep or parent not in activity)]
+
+    stamps = [float(event["timestamp"]) for event in events]
+    low, high = min(stamps), max(stamps)
+    span = max(high - low, 1e-9)
+    bin_count = min(max_bins, max(1, len(events)))
+    width = span / bin_count
+    counts = [0] * bin_count
+    for stamp in stamps:
+        index = min(bin_count - 1, int((stamp - low) / width))
+        counts[index] += 1
+    peak = max(counts) if counts else 0
+    bins = [{"start": round(low + index * width, 3), "count": count,
+             "share": round(count / peak, 6) if peak else 0.0}
+            for index, count in enumerate(counts)]
+
+    return {
+        "nodes": nodes,
+        "edges": edges,
+        "bins": bins,
+        "window": {"start": low, "end": high, "seconds": round(span, 3)},
+        "truncated": truncated,
+        "node_count": len(activity),
+        "edge_count": len(parents),
+        "rendered_nodes": len(nodes),
+        "notes": [
+            "Each pid has exactly one resolved parent, matching the analysis model.",
+            "A parent outside the observed window is rendered as a dangling root.",
+            "Node count is capped; 'truncated' reports whether processes were dropped.",
+        ],
+    }
+
+
 def benchmark_payload(query: dict) -> dict:
     def as_int(key: str, default: int, low: int, high: int) -> int:
         raw = query.get(key)
@@ -248,6 +320,12 @@ class CabidHandler(BaseHTTPRequestHandler):
                 self._json({"name": name, "events": load_dataset(name)})
             elif path == "/api/benchmark":
                 self._json(benchmark_payload({key: values[0] for key, values in query.items()}))
+            elif path == "/api/graph":
+                name = (query.get("dataset") or [""])[0]
+                if not name:
+                    raise ApiError(422, "dataset is required")
+                events = load_dataset(name)
+                self._json(graph_payload(events))
             elif path == "/api/defaults":
                 config = load_config(self.config_path)
                 policy = load_policy(self.policy_path)
@@ -270,6 +348,9 @@ class CabidHandler(BaseHTTPRequestHandler):
             payload = self._read_body()
             if path == "/api/analyze":
                 self._json(analyze_payload(payload))
+            elif path == "/api/graph":
+                events = parse_events(payload.get("events"))
+                self._json(graph_payload(events))
             elif path == "/api/baseline":
                 self._json(build_baseline_payload(payload))
             else:

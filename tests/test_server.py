@@ -178,3 +178,105 @@ def test_analyze_endpoint_returns_scope_information(live_server):
     assert report["containers"]["container_aware"] is True
     assert report["containers"]["scope_count"] == 2
     assert report["containers"]["collision_count"] == 1
+
+
+# ----------------------------------------------------------- graph endpoint ----
+
+def _graph_events(count: int = 30) -> list[dict]:
+    return [{
+        "timestamp": 1760000000.0 + index,
+        "event_type": "file_write",
+        "process_id": 100 + index % 5,
+        "parent_process_id": 1 if index % 5 else 0,
+        "process_name": f"svc-{index % 5}",
+        "executable": "",
+        "target": "",
+        "source": "test",
+    } for index in range(count)]
+
+
+def test_graph_payload_resolves_one_parent_per_pid():
+    from cabid.server import graph_payload
+
+    graph = graph_payload(_graph_events())
+    pids = [node["pid"] for node in graph["nodes"]]
+    assert len(pids) == len(set(pids))
+    assert graph["node_count"] == 5
+    for node in graph["nodes"]:
+        assert node["parent"] is None or isinstance(node["parent"], int)
+
+
+def test_graph_payload_bins_cover_the_window():
+    from cabid.server import graph_payload
+
+    graph = graph_payload(_graph_events())
+    assert sum(bin_["count"] for bin_ in graph["bins"]) == 30
+    assert graph["window"]["start"] == 1760000000.0
+    assert graph["window"]["end"] >= graph["window"]["start"]
+    assert all(0.0 <= bin_["share"] <= 1.0 for bin_ in graph["bins"])
+
+
+def test_graph_payload_caps_nodes_and_reports_truncation():
+    from cabid.server import graph_payload
+
+    events = _graph_events(600)
+    for index, event in enumerate(events):
+        event["process_id"] = 1000 + index
+    graph = graph_payload(events, max_nodes=50)
+    assert graph["truncated"] is True
+    assert graph["rendered_nodes"] == 50
+    assert graph["node_count"] == 600
+
+
+def test_graph_payload_handles_empty_input():
+    from cabid.server import graph_payload
+
+    graph = graph_payload([])
+    assert graph["nodes"] == [] and graph["bins"] == []
+    assert graph["notes"]
+
+
+def test_graph_payload_keeps_a_parent_outside_the_window_dangling():
+    from cabid.server import graph_payload
+
+    events = [{"timestamp": 1.0, "event_type": "process_exec", "process_id": 5,
+               "parent_process_id": 999, "process_name": "child", "executable": "",
+               "target": "", "source": "t"}]
+    graph = graph_payload(events)
+    assert graph["nodes"][0]["parent"] == 999
+    assert graph["edges"][0]["source"] == 999
+
+
+def test_graph_endpoint_serves_bundled_dataset(live_server):
+    status, body = call(f"{live_server}/api/graph?dataset=tree-example.jsonl")
+    assert status == 200
+    payload = json.loads(body)
+    assert payload["node_count"] >= 1
+    assert payload["bins"]
+
+
+def test_graph_endpoint_requires_a_dataset(live_server):
+    status, body = call(f"{live_server}/api/graph")
+    assert status == 422
+    assert "dataset is required" in json.loads(body)["error"]
+
+
+def test_graph_endpoint_accepts_posted_events(live_server):
+    status, body = call(f"{live_server}/api/graph", "POST", {"events": _graph_events(10)})
+    assert status == 200
+    assert json.loads(body)["node_count"] == 5
+
+
+def test_graph_endpoint_rejects_malformed_events(live_server):
+    status, body = call(f"{live_server}/api/graph", "POST", {"events": "not jsonl"})
+    assert status == 422
+
+
+def test_dashboard_page_exposes_the_new_tabs(live_server):
+    status, body = call(f"{live_server}/")
+    assert status == 200
+    text = body.decode("utf-8")
+    for tab in ("Process graph", "Timeline", "Filter"):
+        assert tab in text
+    assert "/api/graph" in text
+    assert 'id="build-graph"' in text
