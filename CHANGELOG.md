@@ -7,6 +7,36 @@ All notable changes to CABID are documented here. The format follows
 > **Status:** alpha research prototype. Minor versions may change scoring
 > behaviour; every report carries a `config_digest` so results remain traceable.
 
+## [Unreleased]
+
+### Added
+
+- **Response plans** (`cabid/response.py`, `cabid respond`): turn a report into a
+  containment plan. Evidence from rules, tree, entities, and policy is mapped to
+  kill-chain phases; every piece keeps its source. Phases are graded
+  `single_signal` / `corroborated` / `strong`.
+- **Five gates** before anything destructive: protected processes (including pid 1
+  and the tree root), kill-chain corroboration (2+ phases), telemetry sufficiency,
+  a per-plan budget that counts suspension, and containment-loop detection.
+- **Escalation ladder**: `monitor` → `snapshot` → `suspend_process` →
+  `quarantine_file` → `kill_process` → `block_address` / `isolate_host` /
+  `disable_account`. The lowest permitted rung is always chosen; suspension is
+  preferred over killing because it stops the activity and keeps the memory image.
+- **Audited execution** (`cabid/executor.py`, `cabid respond --apply`): digest-bound
+  human approval, `SIGSTOP`/`SIGKILL` only, evidence capture, quarantine copies.
+  Every step is audited *before* it runs; skips are audited too. Network and account
+  actions are emitted as commands, never executed.
+- **Containment history**: executed actions are recorded (pid, action, time only) so
+  a containment loop can be detected on the next run.
+- `docs/response.md`.
+
+### Changed
+
+- Suspension is reported as a **reversible outage**, not as observe-only. A count
+  that hides an outage behind a tidy number is the wrong count.
+- The per-plan budget counts every action that takes a process down, not only the
+  irreversible ones.
+
 ## [0.7.0] — 2026-11-13
 
 Detection depth, distribution hygiene, and two integrations. No change to the

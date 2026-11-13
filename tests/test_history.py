@@ -63,3 +63,36 @@ def test_non_database_file_is_reported(tmp_path):
     broken.write_text("this is definitely not a database" * 50, encoding="utf-8")
     with pytest.raises(HistoryError):
         list_runs(broken)
+
+
+def test_containments_are_recorded_and_listed(tmp_path):
+    from cabid.history import list_containments, record_containment
+
+    db = tmp_path / "h.sqlite3"
+    record_containment(db, 401, "suspend_process", "digest")
+    record_containment(db, 401, "kill_process")
+    rows = list_containments(db)
+    assert [row["action"] for row in rows] == ["kill_process", "suspend_process"]
+    assert rows[0]["process_id"] == 401
+
+
+def test_containment_records_store_nothing_about_the_process(tmp_path):
+    from cabid.history import record_containment
+
+    db = tmp_path / "h.sqlite3"
+    record_containment(db, 401, "suspend_process", "digest")
+    blob = db.read_bytes()
+    for needle in (b"/tmp/.cache", b"evil", b"10.0.0.9", b"/etc/shadow"):
+        assert needle not in blob
+
+
+def test_containment_input_is_validated(tmp_path):
+    import pytest
+
+    from cabid.history import record_containment
+
+    db = tmp_path / "h.sqlite3"
+    with pytest.raises(ValueError):
+        record_containment(db, 0, "kill_process")
+    with pytest.raises(ValueError):
+        record_containment(db, 5, "   ")

@@ -34,6 +34,9 @@ CABID combines temporal activity, conservative process ancestry checks, and tele
 - Container/namespace-aware analysis: pid scopes, collisions, no bogus cross-scope parents
 - Cross-source clock-skew estimation (reported, never applied automatically)
 - Baseline drift suggestions: proposed profile updates the operator reviews
+- **Gated containment plans** (`cabid respond`): kill-chain corroboration, protected-process
+  and telemetry gates, digest-bound human approval, audited execution of `SIGSTOP`/`SIGKILL`
+  only — network and account actions are emitted as commands, never run
 - Tamper-evident report sealing (SHA-256 digest, optional HMAC) with `cabid seal`
 - Reports in JSON, Markdown, CSV, SARIF 2.1.0, and self-contained HTML
 - Local read-only dashboard (`cabid dashboard`) with no external assets
@@ -137,6 +140,21 @@ and the evidence behind it. Nothing is corrected automatically: a wrong correcti
 reorders your evidence, and a reordered timeline is worse than a known-skewed one.
 See docs/multi-source.md.
 
+## Contain something, carefully
+
+    cabid analyze events.jsonl -o report.json
+    cabid respond report.json -o report.response.json   # review this first
+    cabid respond report.json --apply --dry-run         # what would happen
+    cabid respond report.json --apply --confirm <plan_digest>
+
+CABID will not block anything on its own, and that is deliberate: a heuristic that
+can be triggered by an attacker is a weapon pointed the wrong way. A containment
+action needs kill-chain corroboration (two independent phases, not one noisy rule),
+sufficient telemetry, a process that is not infrastructure, and a human who passed
+the plan's digest back. Suspension is preferred over killing; network and account
+actions are printed as commands for you to run. Every step is written to an audit
+trail *before* it executes. See docs/response.md.
+
 ## Stage it in CI
 
     cabid analyze events.jsonl --format sarif -o cabid.sarif --fail-on SUSPICIOUS
@@ -214,6 +232,7 @@ file_write, network_connect, process_exit, heartbeat. See docs/event-schema.md.
 | docs/benchmark.md | synthetic benchmark caveats |
 | docs/limitations.md | safe-use notes |
 | docs/releasing.md | release checklist and the PyPI trusted-publisher setup |
+| docs/response.md | containment plans, the gates, and why this is not an auto-blocker |
 
 ## Research and limitations
 
