@@ -10,8 +10,8 @@ from .benchmark import run_benchmark
 from .collector import collect_to_jsonl
 from .detector import analyze
 from .explain import render_report
-from .ingest import read_jsonl
-from .normalize import EventError, normalize_many
+from .ingest import normalize_many, read_jsonl
+from .normalize import EventError
 
 
 def main(argv: list[str] | None = None) -> int:
