@@ -4,7 +4,7 @@ import re
 from collections import defaultdict
 
 _EVENT_RE = re.compile(r"msg=audit\((\d+(?:\.\d+)?):(\d+)\)")
-_KV_RE = re.compile(r'([A-Za-z_][A-Za-z0-9_]*)=("(?:\\\\.|[^"])*"|[^\s]+)')
+_KV_RE = re.compile(r'([A-Za-z_][A-Za-z0-9_]*)=("[^"]*"|[^\s]+)')
 _WRITE_MASK = 0x1 | 0x2 | 0x40 | 0x200 | 0x400
 _SYSCALLS = {
     "c000003e": {2:"open",41:"socket",42:"connect",56:"clone",57:"fork",58:"vfork",59:"execve",60:"exit",82:"rename",83:"mkdir",85:"creat",87:"unlink",231:"exit_group",257:"openat",263:"unlinkat",316:"renameat",322:"execveat"},
@@ -26,7 +26,7 @@ def _number(value: str | None) -> int | None:
     if value is None:
         return None
     try:
-        return int(value, 0)
+        return int(value, 10)
     except ValueError:
         return None
 
