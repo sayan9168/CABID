@@ -134,6 +134,7 @@ file_write, network_connect, process_exit, heartbeat. See docs/event-schema.md.
 | docs/entities.md | per-process rollup and its triage semantics |
 | docs/multi-source.md | merging artifacts and time filtering |
 | docs/history.md | local run history and comparisons |
+| docs/repo-metadata.md | repository topics and description (apply with `gh repo edit`) |
 | docs/policy.md | operator policy: sensitive targets, allow-lists, suppressions |
 | docs/reports.md | JSON/Markdown/CSV/SARIF/HTML reports and exit codes |
 | docs/dashboard.md | local dashboard and its HTTP API |
