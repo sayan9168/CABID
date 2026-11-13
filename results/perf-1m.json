@@ -1,0 +1,34 @@
+{
+  "events": 1000000,
+  "file_size_mb": 183.3,
+  "note": "Synthetic uniform events on one machine. Throughput depends on rule complexity, window size, and event shape; treat these as a floor, not as a specification.",
+  "oneshot": {
+    "max_peak_rss_mb": 1115.3,
+    "median_events_per_second": 43747,
+    "runs": [
+      {
+        "events": 1000000,
+        "events_per_second": 43747,
+        "mode": "oneshot",
+        "peak_rss_mb": 1115.3,
+        "seconds": 22.858,
+        "windows": 1
+      }
+    ]
+  },
+  "repeat": 1,
+  "stream": {
+    "max_peak_rss_mb": 22.9,
+    "median_events_per_second": 53228,
+    "runs": [
+      {
+        "events": 1000000,
+        "events_per_second": 53228,
+        "mode": "stream",
+        "peak_rss_mb": 22.9,
+        "seconds": 18.787,
+        "windows": 167
+      }
+    ]
+  }
+}

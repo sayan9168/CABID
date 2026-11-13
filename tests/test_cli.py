@@ -609,3 +609,26 @@ def test_drift_report_cli_detects_a_rate_change(tmp_path, capsys):
     report = json.loads(output.read_text(encoding="utf-8"))
     assert report["drifted"] is True
     assert "not about intent" in report["drift_is_not_an_attack_signal"]
+
+
+def test_analyze_stream_cli_reports_throughput(tmp_path, capsys):
+    from tests.test_streaming import _events
+
+    source = tmp_path / "stream.jsonl"
+    source.write_text("\n".join(json.dumps(event) for event in _events(120)) + "\n",
+                      encoding="utf-8")
+    output = tmp_path / "out" / "stream.json"
+    assert main(["analyze-stream", str(source), "--window-seconds", "60",
+                 "--output", str(output)]) == 0
+    report = json.loads(output.read_text(encoding="utf-8"))
+    assert report["format"] == "cabid-stream-report/1"
+    assert report["events_normalized"] == 120
+    assert json.loads(capsys.readouterr().out)["window_count"] == report["window_count"]
+
+
+def test_analyze_stream_cli_rejects_a_tiny_window(tmp_path, capsys):
+    source = tmp_path / "stream.jsonl"
+    source.write_text(json.dumps({"timestamp": 1.0, "event_type": "file_write",
+                                  "process_id": 1}) + "\n", encoding="utf-8")
+    assert main(["analyze-stream", str(source), "--window-seconds", "1"]) == 1
+    assert "at least" in capsys.readouterr().err

@@ -1,0 +1,66 @@
+{
+  "events": 100000,
+  "file_size_mb": 18.3,
+  "note": "Synthetic uniform events on one machine. Throughput depends on rule complexity, window size, and event shape; treat these as a floor, not as a specification.",
+  "oneshot": {
+    "max_peak_rss_mb": 123.3,
+    "median_events_per_second": 49375,
+    "runs": [
+      {
+        "events": 100000,
+        "events_per_second": 40867,
+        "mode": "oneshot",
+        "peak_rss_mb": 123.3,
+        "seconds": 2.447,
+        "windows": 1
+      },
+      {
+        "events": 100000,
+        "events_per_second": 49375,
+        "mode": "oneshot",
+        "peak_rss_mb": 122.9,
+        "seconds": 2.025,
+        "windows": 1
+      },
+      {
+        "events": 100000,
+        "events_per_second": 49809,
+        "mode": "oneshot",
+        "peak_rss_mb": 123.2,
+        "seconds": 2.008,
+        "windows": 1
+      }
+    ]
+  },
+  "repeat": 3,
+  "stream": {
+    "max_peak_rss_mb": 22.9,
+    "median_events_per_second": 58930,
+    "runs": [
+      {
+        "events": 100000,
+        "events_per_second": 51363,
+        "mode": "stream",
+        "peak_rss_mb": 22.8,
+        "seconds": 1.947,
+        "windows": 17
+      },
+      {
+        "events": 100000,
+        "events_per_second": 59468,
+        "mode": "stream",
+        "peak_rss_mb": 22.9,
+        "seconds": 1.682,
+        "windows": 17
+      },
+      {
+        "events": 100000,
+        "events_per_second": 58930,
+        "mode": "stream",
+        "peak_rss_mb": 22.9,
+        "seconds": 1.697,
+        "windows": 17
+      }
+    ]
+  }
+}

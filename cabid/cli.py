@@ -36,6 +36,7 @@ from .executor import ExecutionError, dry_run, execute_plan
 from .response import ACTIONS, ResponseError, build_plan, render_plan, write_plan
 from .sigma import SigmaError, import_sigma
 from .stix import build_bundle, write_bundle
+from .streaming import StreamError, stream_file
 from .signature import SealError, seal_report, sign_file, verify_file
 from .timeline import build_timeline, render_timeline_markdown, render_timeline_text
 from .watch import watch_file
@@ -229,6 +230,16 @@ def _build_parser() -> argparse.ArgumentParser:
     corpus.add_argument("--cache", help="cache directory (default: $CABID_CACHE or ~/.cache/cabid)")
     corpus.add_argument("--refresh", action="store_true", help="re-download even if cached")
     corpus.add_argument("--offline", action="store_true", help="never touch the network")
+
+    astream = sub.add_parser(
+        "analyze-stream",
+        help="score a JSONL stream window by window with bounded memory")
+    astream.add_argument("input", help="JSONL event stream")
+    astream.add_argument("--window-seconds", type=float, default=60.0)
+    astream.add_argument("--config", "-c", help="analysis configuration JSON")
+    astream.add_argument("--baseline", "-b", help="baseline profile JSON")
+    astream.add_argument("--sample-limit", type=int, default=2000)
+    astream.add_argument("--output", "-o", help="write the stream report as JSON")
 
     val = sub.add_parser(
         "validate-baseline",
@@ -901,6 +912,22 @@ def main(argv: list[str] | None = None) -> int:
                 report_path.parent.mkdir(parents=True, exist_ok=True)
                 report_path.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8")
             print(json.dumps(summary, indent=2, sort_keys=True))
+            return 0
+        if args.command == "analyze-stream":
+            try:
+                report = stream_file(args.input, window_seconds=args.window_seconds,
+                                     config=load_config(args.config),
+                                     profile=load_profile(args.baseline) if args.baseline else None,
+                                     sample_limit=args.sample_limit)
+            except (StreamError, ValueError, ConfigError) as exc:
+                print(f"error: {exc}", file=sys.stderr)
+                return 1
+            if args.output:
+                destination = Path(args.output)
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                destination.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n",
+                                       encoding="utf-8")
+            print(json.dumps(report, indent=2, sort_keys=True))
             return 0
         if args.command == "validate-baseline":
             return _cmd_validate_baseline(args)

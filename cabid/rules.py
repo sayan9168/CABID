@@ -190,13 +190,43 @@ def load_rules_from_dict(raw: dict, origin: str = "builtin") -> list[dict]:
     return [rule for rule in validated if rule["enabled"]]
 
 
+#: Process-wide cache of translated glob patterns. Rule packs are re-evaluated on
+#: every window, so the same few hundred patterns are translated thousands of times
+#: per stream. ``fnmatch`` translates on every call; caching the translation is
+#: semantics-preserving because ``fnmatch.translate`` is the same function it uses.
+_GLOB_CACHE: dict[str, tuple[bool, str, re.Pattern[str] | None]] = {}
+
+
+def _translate(pattern: str) -> tuple[bool, str, re.Pattern[str] | None]:
+    """Split a pattern into (ends-with-star, literal prefix, regex-or-None).
+
+    A literal pattern keeps its original text as the prefix so an exact match still
+    compares against the whole value; the original implementation lowercased the
+    value once and then reconstructed the literal, which compared a value against
+    the wrong string.
+    """
+    lowered = pattern.lower()
+    body = lowered[:-1] if lowered.endswith("*") else lowered
+    needs_regex = any(character in body for character in "*?[")
+    compiled = re.compile(fnmatch.translate(lowered)) if needs_regex else None
+    return lowered.endswith("*"), body, compiled
+
+
 def _glob_any(value: str, patterns: list[str]) -> bool:
     lowered = value.lower()
     for pattern in patterns:
-        lowered_pattern = pattern.lower()
-        if fnmatch.fnmatch(lowered, lowered_pattern):
+        translated = _GLOB_CACHE.get(pattern)
+        if translated is None:
+            translated = _translate(pattern)
+            if len(_GLOB_CACHE) < 4096:
+                _GLOB_CACHE[pattern] = translated
+        prefix_star, prefix, compiled = translated
+        if prefix_star and lowered.startswith(prefix):
             return True
-        if lowered_pattern.endswith("*") and lowered.startswith(lowered_pattern[:-1]):
+        if compiled is None:
+            if lowered == prefix:
+                return True
+        elif compiled.match(lowered) is not None:
             return True
     return False
 
