@@ -28,6 +28,7 @@ from .explain import FORMATS, render, render_json
 from .history import DEFAULT_DB, HistoryError, compare_runs, list_runs, record_run
 from .ingest import normalize_many, read_jsonl
 from .normalize import EventError
+from .novelty import NoveltyError, drift as drift_report, validate as validate_baseline
 from .policy import PolicyError, evaluate_policy, load_policy
 from .realworld import run_adfa_benchmark
 from .rules import RuleError, load_rules
@@ -229,6 +230,24 @@ def _build_parser() -> argparse.ArgumentParser:
     corpus.add_argument("--refresh", action="store_true", help="re-download even if cached")
     corpus.add_argument("--offline", action="store_true", help="never touch the network")
 
+    val = sub.add_parser(
+        "validate-baseline",
+        help="audit a baseline profile against held-out benign sessions")
+    val.add_argument("profile", help="baseline profile JSON")
+    val.add_argument("inputs", nargs="+", help="held-out benign JSONL sessions")
+    val.add_argument("--min-sessions", type=int, default=20)
+    val.add_argument("--novelty-cutoff", type=float, default=0.25)
+    val.add_argument("--output", "-o", help="write the validation report as JSON")
+
+    drf = sub.add_parser(
+        "drift-report",
+        help="compare recent benign sessions against a baseline and propose updates")
+    drf.add_argument("profile", help="baseline profile JSON")
+    drf.add_argument("inputs", nargs="+", help="recent benign JSONL sessions")
+    drf.add_argument("--threshold", type=float, default=0.30)
+    drf.add_argument("--novelty-cutoff", type=float, default=0.25)
+    drf.add_argument("--output", "-o", help="write the drift report as JSON")
+
     calib = sub.add_parser(
         "calibrate",
         help="derive thresholds from benign sessions instead of using hand-picked constants")
@@ -302,6 +321,42 @@ def _load_analyze_events(args) -> tuple[list[dict], dict]:
         events = read_jsonl(args.input[0])
     events, window = filter_events(events, getattr(args, "since", None), getattr(args, "until", None))
     return events, {"sources": sources_block, "time_filter": window}
+
+
+def _cmd_validate_baseline(args) -> int:
+    try:
+        profile = load_profile(args.profile)
+        sessions = [(Path(raw).name, read_jsonl(raw)) for raw in args.inputs]
+        report = validate_baseline(profile, sessions, minimum_sessions=args.min_sessions,
+                                   novelty_cutoff=args.novelty_cutoff)
+    except (NoveltyError, EventError, ValueError, OSError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    if args.output:
+        destination = Path(args.output)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n",
+                               encoding="utf-8")
+    print(json.dumps(report, indent=2, sort_keys=True))
+    return 0 if report["verdict"] != "INVALID" else 1
+
+
+def _cmd_drift_report(args) -> int:
+    try:
+        profile = load_profile(args.profile)
+        sessions = [(Path(raw).name, read_jsonl(raw)) for raw in args.inputs]
+        report = drift_report(profile, sessions, threshold=args.threshold,
+                              novelty_cutoff=args.novelty_cutoff)
+    except (NoveltyError, EventError, ValueError, OSError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    if args.output:
+        destination = Path(args.output)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n",
+                               encoding="utf-8")
+    print(json.dumps(report, indent=2, sort_keys=True))
+    return 0
 
 
 def _cmd_calibrate(args) -> int:
@@ -847,6 +902,10 @@ def main(argv: list[str] | None = None) -> int:
                 report_path.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8")
             print(json.dumps(summary, indent=2, sort_keys=True))
             return 0
+        if args.command == "validate-baseline":
+            return _cmd_validate_baseline(args)
+        if args.command == "drift-report":
+            return _cmd_drift_report(args)
         if args.command == "calibrate":
             return _cmd_calibrate(args)
         if args.command == "corpus":

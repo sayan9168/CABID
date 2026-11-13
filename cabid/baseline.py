@@ -81,6 +81,12 @@ def build_profile(sessions: list[tuple[str, list[dict]]], minimum_sessions: int 
         "event_count": sum(len(events) for _, events in usable),
         "sessions": sorted(name for name, _ in usable),
         "rate_per_minute": {"median": round(median_rate, 6), "scale": round(scale, 6)},
+        # The reference rate sample is kept so a later drift check can run a proper
+        # two-sample test. Comparing a held-out distribution against a single median
+        # is degenerate by construction: an ECDF always sits ~0.5 away from a step
+        # function, so the statistic carries no information. Rates are scalars and
+        # reveal no paths or command lines, so storing them adds no exposure.
+        "rate_samples": sorted(round(rate, 6) for rate in rates)[:5000],
         "type_mix": mix_totals,
         "process_names": sorted(per_process),
         "parent_child": [list(edge) for edge in sorted(edges)],

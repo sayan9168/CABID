@@ -555,3 +555,57 @@ def test_calibrate_cli_compare_mode(tmp_path, capsys):
 def test_calibrate_cli_rejects_missing_input(tmp_path, capsys):
     assert main(["calibrate", str(tmp_path / "absent.jsonl")]) == 2
     assert "No such file" in capsys.readouterr().err
+
+
+def test_validate_baseline_cli_reports_a_verdict(tmp_path, capsys):
+    from cabid.baseline import build_profile, write_profile
+    from tests.test_novelty import _sessions
+
+    profile = build_profile(_sessions(40, prefix="fit"), minimum_sessions=3)
+    profile_path = write_profile(profile, tmp_path / "profile.json")
+    sources = []
+    for name, events in _sessions(30, prefix="held"):
+        path = tmp_path / f"{name}.jsonl"
+        path.write_text("\n".join(json.dumps(event) for event in events) + "\n",
+                        encoding="utf-8")
+        sources.append(str(path))
+    output = tmp_path / "validation.json"
+    assert main(["validate-baseline", str(profile_path), *sources,
+                 "--output", str(output)]) == 0
+    report = json.loads(output.read_text(encoding="utf-8"))
+    assert report["verdict"] in {"SOUND", "NEEDS_REFIT"}
+    assert json.loads(capsys.readouterr().out)["verdict"] == report["verdict"]
+
+
+def test_validate_baseline_cli_errors_on_too_few_sessions(tmp_path, capsys):
+    from cabid.baseline import build_profile, write_profile
+    from tests.test_novelty import _sessions
+
+    profile = build_profile(_sessions(40, prefix="fit"), minimum_sessions=3)
+    profile_path = write_profile(profile, tmp_path / "profile.json")
+    name, events = _sessions(1, prefix="held")[0]
+    source = tmp_path / "one.jsonl"
+    source.write_text("\n".join(json.dumps(event) for event in events) + "\n",
+                      encoding="utf-8")
+    assert main(["validate-baseline", str(profile_path), str(source)]) == 1
+    assert "required" in capsys.readouterr().err
+
+
+def test_drift_report_cli_detects_a_rate_change(tmp_path, capsys):
+    from cabid.baseline import build_profile, write_profile
+    from tests.test_novelty import _sessions
+
+    profile = build_profile(_sessions(40, prefix="fit", duration=600.0),
+                            minimum_sessions=3)
+    profile_path = write_profile(profile, tmp_path / "profile.json")
+    sources = []
+    for name, events in _sessions(30, prefix="fast", duration=60.0):
+        path = tmp_path / f"{name}.jsonl"
+        path.write_text("\n".join(json.dumps(event) for event in events) + "\n",
+                        encoding="utf-8")
+        sources.append(str(path))
+    output = tmp_path / "drift.json"
+    assert main(["drift-report", str(profile_path), *sources, "--output", str(output)]) == 0
+    report = json.loads(output.read_text(encoding="utf-8"))
+    assert report["drifted"] is True
+    assert "not about intent" in report["drift_is_not_an_attack_signal"]
