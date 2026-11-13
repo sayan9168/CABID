@@ -88,16 +88,18 @@ def _annotations(report: dict) -> dict[int, list[dict]]:
                 "severity": finding.get("severity"),
                 "detail": finding.get("detail"),
             })
-    for entity in (report.get("entities") or {}).get("top_entities") or []:
-        if not entity.get("sensitive_hits") and not entity.get("contradiction_events"):
-            continue
-        for ref in entity.get("sensitive_refs") or []:
-            annotations.setdefault(-1, []).append({
-                "kind": "entity",
-                "id": f"pid {entity['process_id']}",
-                "severity": "medium",
-                "detail": f"sensitive target reference: {ref}",
-            })
+    # Several matches can share an evidence row (e.g. overlapping sequence anchors).
+    # Collapse to one annotation per (kind, id, severity) per row.
+    for index, items in annotations.items():
+        seen = set()
+        unique = []
+        for item in items:
+            key = (item["kind"], item["id"], item.get("severity"))
+            if key in seen:
+                continue
+            seen.add(key)
+            unique.append(item)
+        annotations[index] = unique
     return annotations
 
 

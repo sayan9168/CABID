@@ -97,3 +97,11 @@ def test_custom_rules_flow_into_timeline():
     timeline = build_timeline(events, report)
     ids = {item["id"] for row in timeline["rows"] for item in row["annotations"]}
     assert "download-then-exec" in ids
+
+
+def test_annotations_are_deduplicated_per_row():
+    events = stream()
+    timeline = build_timeline(events, analyze(events))
+    for row in timeline["rows"]:
+        keys = [(item["kind"], item["id"], item.get("severity")) for item in row["annotations"]]
+        assert len(keys) == len(set(keys)), f"duplicate annotation on row {row['seq']}"
