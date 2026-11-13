@@ -109,3 +109,39 @@ def test_window_length_must_be_positive():
 
     with pytest.raises(ValueError):
         analyze_windows(complete_events(), 0)
+
+
+def test_threshold_bands_map_to_statuses():
+    """A stream with enough classes to be sufficient must land in a band."""
+    from cabid.detector import analyze, risk_level
+
+    report = analyze(complete_events())
+    assert report["status"] in {"NO_ANOMALY_DETECTED", "SUSPICIOUS", "HIGH_RISK"}
+    assert risk_level(0.0) == "NO_ANOMALY_DETECTED"
+    assert risk_level(1.0) == "HIGH_RISK"
+    assert risk_level(0.7) == "SUSPICIOUS"
+
+
+def test_a_baseline_from_the_config_is_loaded(tmp_path):
+    import json
+
+    from cabid.baseline import build_profile, write_profile
+    from cabid.detector import analyze
+
+    sessions = [("a", complete_events()), ("b", complete_events()),
+                ("c", complete_events())]
+    path = tmp_path / "profile.json"
+    write_profile(build_profile(sessions), path)
+    config = {"baseline": str(path)}
+    report = analyze(complete_events(), config)
+    assert report["baseline_used"] is True
+    assert json.loads(path.read_text())["format"]
+
+
+def test_empty_stream_is_insufficient_not_safe():
+    from cabid.detector import analyze
+
+    report = analyze([])
+    assert report["status"] == "INSUFFICIENT_EVIDENCE"
+    assert report["event_count"] == 0
+    assert report["containers"]["container_aware"] is False

@@ -46,7 +46,7 @@ class ApiError(Exception):
 
 
 def list_datasets(directory: Path = DATASET_DIR) -> list[dict]:
-    items = []
+    items: list[dict] = []
     if not directory.is_dir():
         return items
     for path in sorted(directory.glob("*.jsonl")):

@@ -88,6 +88,8 @@ def record_run(report: dict, path: str | Path = DEFAULT_DB, label: str = "run",
              json.dumps(summary, sort_keys=True)),
         )
         connection.commit()
+        if cursor.lastrowid is None:
+            raise HistoryError("database did not return a row id for the recorded run")
         return int(cursor.lastrowid)
     except sqlite3.DatabaseError as exc:
         raise HistoryError(f"cannot record run: {exc}") from exc

@@ -30,9 +30,10 @@
 - The entity rollup is a triage hint, not an attribution. High-ranked processes are
   those least consistent with the observed baseline; noisy-but-benign services look
   the same way.
-- Multi-source merge assumes a shared clock. Cross-host skew reorders events and can
-  change lifecycle and sequence results; duplicates are counted by fingerprint, not
-  removed, and overlapping ranges may double-count the same activity.
+- Multi-source merge assumes a shared clock. Skew is *estimated* and reported, but
+  never corrected: a wrong correction reorders evidence silently. Duplicates are
+  counted by fingerprint, not removed, and overlapping ranges may double-count the
+  same activity.
 - Time filtering is inclusive and UTC-first for naive timestamps. A filtered report
   is always marked with the trimmed event counts.
 - The history database is a local convenience store, not a tamper-evident audit log.
@@ -52,5 +53,22 @@
   The seal says nothing about input authenticity or sealing time.
 - Timelines re-shape report data; an unannotated row is one that no rule or policy
   flagged, not proof it was benign.
+- Container awareness comes from `container_id`/`pid_ns` fields in the events, not
+  from cgroups or namespaces. A sensor that does not record container metadata
+  produces a report that cannot tell you whether the activity was namespaced. A pid
+  collision across scopes is normal, not suspicious.
+- Baseline drift suggestions are diffs, not decisions. Drift and compromise look
+  identical in a diff, and accepting a suggestion widens what the baseline treats
+  as benign.
+- Sigma import is a partial translation. Anything in `provenance.unsupported` was
+  dropped, which makes the imported rule weaker than the original. Do not treat an
+  imported rule's silence as the original rule's silence.
+- STIX indicators use `pattern_type: cabid-heuristic` and are not sweeppable
+  IOCs. Confidence values are severity mappings, not measurements, and the bundle
+  is a triage hint, not an attribution.
+- **There is no real-host benchmark.** Every published number comes from synthetic
+  fixtures in `datasets/synthetic/`. Precision, recall, and FPR against real
+  enterprise telemetry are unknown. A green synthetic benchmark tells you the code
+  works, not that the detection does.
 - Test only on systems and logs you own or are authorized to analyze. The sample
   dataset uses the reserved `.invalid` domain.

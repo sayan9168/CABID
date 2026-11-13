@@ -4,7 +4,7 @@
 
 CABID combines temporal activity, conservative process ancestry checks, and telemetry-class completeness over normalized event streams. It reports insufficient evidence when required event classes are absent.
 
-> Research status: alpha prototype (v0.6.0). Novelty and real-world detection performance are not established. Scores are heuristics, not probabilities.
+> Research status: alpha prototype (v0.7.0). Novelty and real-world detection performance are not established. Scores are heuristics, not probabilities.
 
 ## Features
 
@@ -25,17 +25,26 @@ CABID combines temporal activity, conservative process ancestry checks, and tele
 - Multi-source merge with provenance, duplicate counts, and overlap warnings
 - Inclusive time filtering (`--since`/`--until`, ISO-8601 or epoch)
 - Local SQLite run history and run-to-run comparison (`cabid history`)
-- Declarative correlation rules (sequence + count) with a five-rule built-in pack
+- Declarative correlation rules (sequence + count) with a ten-rule built-in pack
 - Process-tree reconstruction: depth, cycles, interpreter-spawn and baseline edge drift
 - Chronological investigation timeline export (Markdown, plain text, JSON)
+- Term-by-term score arithmetic with `--explain-score`
+- Sigma rule import (optional PyYAML extra) that lists everything it could not map
+- STIX 2.1 bundle export for handing findings to another platform
+- Container/namespace-aware analysis: pid scopes, collisions, no bogus cross-scope parents
+- Cross-source clock-skew estimation (reported, never applied automatically)
+- Baseline drift suggestions: proposed profile updates the operator reviews
 - Tamper-evident report sealing (SHA-256 digest, optional HMAC) with `cabid seal`
 - Reports in JSON, Markdown, CSV, SARIF 2.1.0, and self-contained HTML
 - Local read-only dashboard (`cabid dashboard`) with no external assets
 - Best-effort unprivileged Linux /proc polling
-- Limited Linux auditd raw-log importer for x86_64 and aarch64
+- Linux auditd raw-log importer covering exec/fork/exit, file writes, connects,
+  accepts, the setuid family, ptrace/mount/pivot_root/mknod, and chmod/chown on
+  both x86_64 and aarch64, with a per-reason `skipped` breakdown
 - Deterministic synthetic benchmark comparing temporal-only, CABID core, and
   baseline-aware models
 - CI-friendly exit codes (`--exit-code`, `--fail-on`), automated tests, GitHub Actions
+  with lint, type and coverage (>=90%) gates, and a container image
 
 ## Install
 
@@ -94,6 +103,40 @@ occurred, not that the host is compromised — see docs/rules.md. Report seals d
 later edits; they are hash/HMAC integrity, not digital signatures — see
 docs/report-integrity.md.
 
+## See the score as arithmetic
+
+    cabid analyze events.jsonl --explain-score --format md -o report.md
+
+Prints every component's value, its *normalized* weight, and the product that went
+into the total, then states which threshold decided the status. Useful when a
+weight in your config does not look like the weight in the report: the engine
+renormalizes over active components, and inactive novelty is redistributed rather
+than scored as zero. JSON output gets the same walkthrough under
+`score_explanation`. See docs/scoring-explained.md.
+
+## Import Sigma rules and export STIX
+
+    python -m pip install 'cabid[sigma]'
+    cabid import-sigma my-rule.yml -o imported-pack.json
+    cabid analyze events.jsonl -r imported-pack.json
+    cabid export-stix report.json -o bundle.json --host web-01
+
+Sigma translation is partial and says so: anything it cannot map is listed in
+`provenance.unsupported` rather than dropped silently, and two Sigma fields that
+would collapse into one CABID slot are reported because the AND would otherwise
+become an OR. STIX indicators use `pattern_type: cabid-heuristic` — they describe
+a CABID rule match, not a pattern another tool can sweep for. See
+docs/integrations.md.
+
+## Merge sources that disagree about the time
+
+    cabid analyze hostA.jsonl hostB.jsonl -o merged.json
+
+A merged report includes `sources.clock_skew` with a per-source offset estimate
+and the evidence behind it. Nothing is corrected automatically: a wrong correction
+reorders your evidence, and a reordered timeline is worse than a known-skewed one.
+See docs/multi-source.md.
+
 ## Stage it in CI
 
     cabid analyze events.jsonl --format sarif -o cabid.sarif --fail-on SUSPICIOUS
@@ -119,9 +162,13 @@ process/path metadata. They are not installed automatically.
     cabid import-audit /tmp/audit.raw --output /tmp/audit-events.jsonl --report /tmp/import-report.json
     cabid analyze /tmp/audit-events.jsonl
 
-The importer recognizes only a limited syscall subset and does not synthesize
-heartbeat events. A file_write event means a write-capable open intent, not
-proof that bytes were written. See docs/auditd-ingestion.md.
+The importer translates the exec/fork/exit, file-write, connect, accept, setuid,
+ptrace/mount/pivot_root/mknod, and chmod/chown families for x86_64 and aarch64. It
+does not synthesize heartbeat events, and a `file_write` event means a
+write-capable open intent, not proof that bytes were written. Anything it does not
+understand is counted under a reason in `skipped` — a large `unmapped_syscall`
+figure means the stream is only partly understood, not that the host was quiet.
+See docs/auditd-ingestion.md.
 
 ## Run synthetic benchmark
 
@@ -153,6 +200,9 @@ file_write, network_connect, process_exit, heartbeat. See docs/event-schema.md.
 | docs/process-tree.md | tree reconstruction and structural findings |
 | docs/timeline.md | investigation timeline export |
 | docs/report-integrity.md | report sealing and what it does not prove |
+| docs/scoring-explained.md | `--explain-score`: the arithmetic, term by term |
+| docs/integrations.md | Sigma rule import and STIX 2.1 export |
+| docs/containers.md | pid namespaces, scope collisions, what is not done |
 | docs/repo-metadata.md | repository topics and description (apply with `gh repo edit`) |
 | docs/policy.md | operator policy: sensitive targets, allow-lists, suppressions |
 | docs/reports.md | JSON/Markdown/CSV/SARIF/HTML reports and exit codes |

@@ -1,0 +1,58 @@
+name: Bug report
+description: Something in CABID produced a wrong, missing, or crashing result.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. CABID is a research prototype: a wrong *score* is
+        worth reporting, but please do not paste real customer logs, hostnames, or
+        credentials. Redact paths and addresses.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: The behaviour you saw, and the behaviour you expected.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Minimal reproduction
+      description: >
+        Prefer a few lines of synthetic JSONL plus the exact command. Issues with a
+        reproducible input get fixed; "it scored too high" usually cannot be.
+      render: shell
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: CABID version
+      description: Output of `cabid --version`.
+    validations:
+      required: true
+  - type: input
+    id: python
+    attributes:
+      label: Python and OS
+      placeholder: "3.12.1 on Ubuntu 24.04"
+  - type: dropdown
+    id: input-source
+    attributes:
+      label: Where do the events come from
+      options:
+        - Synthetic dataset in the repo
+        - cabid collect-proc
+        - cabid import-audit
+        - Hand-written JSONL
+        - Other / not sure
+  - type: checkboxes
+    id: caveats
+    attributes:
+      label: Before submitting
+      options:
+        - label: I removed real usernames, hostnames, IP addresses, and file contents.
+          required: true
+        - label: This is not a security vulnerability (those go to SECURITY.md).
+          required: true

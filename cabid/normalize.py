@@ -5,7 +5,14 @@ from datetime import datetime, timezone
 from typing import Any
 
 REQUIRED = ("timestamp", "event_type", "process_id")
-ALLOWED = {"process_start", "process_exec", "file_write", "network_connect", "process_exit", "heartbeat"}
+# Core classes every sensor is expected to produce, then optional classes an
+# auditd-based sensor can emit. Optional classes are never required for telemetry
+# sufficiency: a procfs-only sensor cannot produce them at all.
+CORE_EVENT_TYPES = {"process_start", "process_exec", "file_write", "network_connect",
+                    "process_exit", "heartbeat"}
+OPTIONAL_EVENT_TYPES = {"privilege_change", "kernel_state_change", "permission_change",
+                        "network_accept"}
+ALLOWED = CORE_EVENT_TYPES | OPTIONAL_EVENT_TYPES
 
 
 class EventError(ValueError):
@@ -56,4 +63,15 @@ def normalize_event(raw: dict[str, Any]) -> dict[str, Any]:
              "source": str(raw.get("source", "unknown"))[:128]}
     if "event_id" in raw:
         event["event_id"] = str(raw["event_id"])[:128]
+    # Optional container/namespace metadata. Kept only when supplied so that
+    # existing datasets normalize to exactly the same dict as before.
+    for field in ("container_id", "container"):
+        if field in raw and str(raw[field]).strip():
+            event[field] = str(raw[field]).strip()[:128]
+    for field in ("pid_ns", "namespace_pid"):
+        if field in raw and raw[field] is not None:
+            value = _strict_int(raw[field], field)
+            if value < 0:
+                raise EventError(f"{field} must be non-negative")
+            event[field] = value
     return event

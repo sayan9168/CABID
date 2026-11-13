@@ -69,7 +69,7 @@ def process_tree(events: list[dict], profile: dict | None = None) -> dict:
     known_edges = _baseline_edges(profile)
 
     findings: list[dict] = []
-    edge_counts = Counter()
+    edge_counts: Counter[tuple[str, str]] = Counter()
     for pid, ppid in parents.items():
         parent_name = labels.get(ppid, "unknown")
         child_name = labels.get(pid, "unknown")
@@ -152,7 +152,7 @@ def _cycles(pids: set[int], parents: dict[int, int]) -> list[int]:
     """Return pids that participate in a multi-node ancestry cycle."""
     in_cycle = []
     for start in sorted(pids):
-        seen = []
+        seen: list[int] = []
         current = start
         while current in parents and len(seen) <= len(pids):
             current = parents[current]

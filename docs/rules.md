@@ -85,7 +85,9 @@ rule still fails loudly).
 
 ## Built-in pack
 
-Five rules ship by default and are always evaluated unless `--no-rules` is given:
+Ten rules ship by default and are always evaluated unless `--no-rules` is given.
+
+Core lifecycle and transfer rules:
 
 | Rule | Severity | Shape |
 | --- | --- | --- |
@@ -95,7 +97,24 @@ Five rules ship by default and are always evaluated unless `--no-rules` is given
 | `rapid-restart-loop` | medium | ≥12 `process_start` bursts (crash loop / re-exec stomp) |
 | `exit-then-activity` | high | `process_exit` → same-pid file/network activity |
 
-Each carries a `mitre` string prefixed `hint:` on purpose — the mapping is
+Privilege and kernel-state rules (these need auditd-only event classes):
+
+| Rule | Severity | Shape |
+| --- | --- | --- |
+| `privilege-escalation-to-exec` | critical | `privilege_change` → exec from a staging path within 60s |
+| `ptrace-then-credential-read` | critical | `ptrace` → write/`permission_change` on a credential file within 120s |
+| `permission-relaxed-on-credential` | high | chmod/chown exec → `permission_change` on shadow/sudoers/ssh key within 30s |
+| `kernel-state-then-persistence` | critical | mount/umount2/pivot_root/ptrace → write to cron/systemd/rc path |
+| `bulk-accept-then-exec` | medium | ≥20 `network_accept` in 30s → shell spawn |
+
+Two notes on the second table. These rules need `privilege_change`,
+`kernel_state_change`, `permission_change`, or `network_accept`, which only the
+auditd importer produces — they will never fire on a procfs-only stream, and that
+absence is not a clean bill of health. And `permission-relaxed-on-credential`
+puts the exec *before* the `permission_change` because that is the order auditd
+emits: the chmod process starts, then the kernel records the mode change.
+
+Each rule carries a `mitre` string prefixed `hint:` on purpose — the mapping is
 suggestive, not an assertion of technique use.
 
 ## Output

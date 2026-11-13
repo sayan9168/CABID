@@ -1,4 +1,11 @@
-"""Telemetry coverage estimation over configured event classes."""
+"""Telemetry coverage estimation over configured event classes.
+
+Only the core classes a generic sensor can produce are required by default.
+Auditd-only classes (``privilege_change``, ``kernel_state_change``,
+``permission_change``, ``network_accept``) are accepted input but never required,
+because a procfs-based sensor cannot emit them at all. Requiring them would mark
+every auditd stream insufficient while a procfs stream looked complete.
+"""
 EXPECTED = {
     "process_start",
     "process_exec",

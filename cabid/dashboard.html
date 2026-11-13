@@ -138,6 +138,7 @@
       <button role="tab" aria-selected="false" data-tab="lifecycle">Lifecycle</button>
       <button role="tab" aria-selected="false" data-tab="rules">Rules</button>
       <button role="tab" aria-selected="false" data-tab="tree">Tree</button>
+      <button role="tab" aria-selected="false" data-tab="containers">Scopes</button>
       <button role="tab" aria-selected="false" data-tab="entities">Processes</button>
       <button role="tab" aria-selected="false" data-tab="policy">Policy</button>
       <button role="tab" aria-selected="false" data-tab="windows">Windows</button>
@@ -270,6 +271,29 @@ function renderTab(tab) {
         '<th>Count</th></tr>' + edges.slice(0, 10).map((e) =>
           `<tr><td>${esc(e.parent)}</td><td>${esc(e.child)}</td><td>${esc(e.count)}</td></tr>`).join("") +
         "</table>" : "");
+  } else if (tab === "containers") {
+    const scope = report.containers;
+    if (!scope) { pane.innerHTML = '<div class="empty">No scope information in this report.</div>'; return; }
+    const list = scope.scopes || [], collisions = scope.pid_collisions || [];
+    pane.innerHTML = `<div class="metrics">
+        <div class="metric"><span>Container metadata</span><strong>${scope.container_aware ? "yes" : "no"}</strong></div>
+        <div class="metric"><span>Scopes</span><strong>${esc(scope.scope_count)}</strong></div>
+        <div class="metric"><span>Namespaced events</span><strong>${esc(scope.namespaced_event_count)}</strong></div>
+        <div class="metric"><span>Host events</span><strong>${esc(scope.host_event_count)}</strong></div>
+      </div>
+      <p class="hint" style="margin:8px 0 12px">${esc((scope.notes || []).join(" "))}</p>` +
+      (list.length ? '<table><tr><th>Scope</th><th>Events</th><th>Processes</th><th>Names</th></tr>' +
+        list.map((item) =>
+          `<tr><td><code>${esc(item.scope)}</code></td><td>${esc(item.events)}</td>` +
+          `<td>${esc(item.process_count)}</td>` +
+          `<td>${esc((item.process_names || []).join(", "))}</td></tr>`).join("") + "</table>"
+        : '<div class="empty">No scopes recorded.</div>') +
+      (collisions.length
+        ? '<h2 style="margin-top:18px">Pid collisions</h2><p class="hint">A pid that exists in more than one ' +
+          'scope is expected, not suspicious. It is exactly the case where a naive merge would invent a parent link.</p>' +
+          '<table><tr><th>PID</th><th>Scopes</th></tr>' + collisions.map((item) =>
+            `<tr><td>${esc(item.pid)}</td><td>${esc((item.scopes || []).join(", "))}</td></tr>`).join("") + "</table>"
+        : "");
   } else if (tab === "entities") {
     const entities = report.entities;
     if (!entities) { pane.innerHTML = '<div class="empty">No process rollup in this report.</div>'; return; }

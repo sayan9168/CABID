@@ -1,10 +1,44 @@
 name: tests
+
 on:
   push:
   pull_request:
+
 permissions:
   contents: read
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
+  quality:
+    name: lint, types, coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install --upgrade pip
+      - run: python -m pip install -e '.[test]'
+      - name: pyflakes
+        run: pyflakes cabid tests
+      - name: mypy
+        run: mypy cabid
+      - name: coverage floor (90%)
+        run: |
+          coverage run -m pytest
+          coverage report --skip-covered
+          coverage report --fail-under=90 > /dev/null
+      - name: build the distribution
+        run: |
+          python -m pip install build
+          python -m build --outdir /tmp/dist
+          python -m pip install --force-reinstall /tmp/dist/*.whl
+          cabid --version
+          python -m cabid --version
+
   test:
     runs-on: ubuntu-latest
     strategy:
@@ -62,6 +96,8 @@ jobs:
           assert report['sources']['source_count'] == 2
           assert report['time_filter']['active'] is True
           assert report['entities']['entity_count'] >= 1
+          # clock skew is estimated but never applied
+          assert report['sources']['clock_skew']['applied'] is False
           PY
           cabid analyze datasets/synthetic/example.jsonl --history-db /tmp/history.sqlite3 \
             --save-history --label calm -o /tmp/calm.json --quiet
@@ -99,6 +135,7 @@ jobs:
           assert 'download-then-exec' in ids
           # rule and tree output must not move the headline score
           assert 'anomaly_score' in report and isinstance(report['components'], dict)
+          assert report['containers']['container_aware'] is False
           PY
           cabid analyze datasets/synthetic/tree-example.jsonl --no-rules --no-tree             --format json -o /tmp/bare.json
           python -c "import json;d=json.load(open('/tmp/bare.json'));assert 'rules' not in d and 'tree' not in d"
@@ -117,6 +154,76 @@ jobs:
             echo "tampered report verified; sealing is broken"; exit 1
           fi
           python -c "import json;assert json.load(open('/tmp/tamper.json'))['verified'] is False;print('tamper detected')"
+      - name: Score explanation recomputes
+        run: |
+          cabid analyze datasets/synthetic/tree-example.jsonl --explain-score \
+            -o /tmp/explained.json --quiet
+          python - <<'PY'
+          import json
+          report = json.load(open('/tmp/explained.json'))
+          explanation = report['score_explanation']
+          assert explanation['recomputes_consistently'] is True
+          assert abs(explanation['recomputed_score'] - report['anomaly_score']) < 1e-6
+          assert len(explanation['steps']) == 5
+          PY
+      - name: Sigma import and STIX export round trip
+        run: |
+          cabid import-sigma docs/cabid-sigma.example.yml -o /tmp/sigma-pack.json
+          python - <<'PY'
+          import json
+          document = json.load(open('/tmp/sigma-pack.json'))
+          assert document['provenance']['unsupported'] == []
+          assert document['format'].startswith('cabid-rules/')
+          PY
+          cabid analyze datasets/synthetic/tree-example.jsonl -r /tmp/sigma-pack.json \
+            -o /tmp/sigma-report.json --quiet
+          python -c "import json;d=json.load(open('/tmp/sigma-report.json'));assert d['rules']['rule_count']==1"
+          cabid export-stix /tmp/tree.json -o /tmp/bundle.json --host web-01
+          python - <<'PY'
+          import json
+          bundle = json.load(open('/tmp/bundle.json'))
+          assert bundle['type'] == 'bundle' and bundle['spec_version'] == '2.1'
+          kinds = {}
+          for item in bundle['objects']:
+              kinds[item['type']] = kinds.get(item['type'], 0) + 1
+          assert kinds['identity'] == 1 and kinds['report'] == 1
+          indicators = [i for i in bundle['objects'] if i['type'] == 'indicator']
+          assert indicators and all(i['pattern_type'] == 'cabid-heuristic' for i in indicators)
+          assert all(i['x_cabid_semantics'] == 'pattern match, not a verdict' for i in indicators)
+          report = [i for i in bundle['objects'] if i['type'] == 'report'][0]
+          children = {i['id'] for i in bundle['objects'] if i['type'] in {'indicator', 'note'}}
+          assert set(report['object_refs']) == children
+          PY
+      - name: Container-aware analysis
+        run: |
+          python - <<'PY'
+          import json
+          rows = [
+              {'timestamp': 1, 'event_type': 'process_start', 'process_id': 1,
+               'parent_process_id': 0, 'process_name': 'nginx', 'container_id': 'abc123'},
+              {'timestamp': 2, 'event_type': 'process_start', 'process_id': 42,
+               'parent_process_id': 1, 'process_name': 'php', 'container_id': 'abc123'},
+              {'timestamp': 3, 'event_type': 'process_start', 'process_id': 42,
+               'parent_process_id': 0, 'process_name': 'java', 'container_id': 'def456'},
+          ]
+          open('/tmp/container.jsonl', 'w').write('\n'.join(json.dumps(r) for r in rows) + '\n')
+          PY
+          cabid analyze /tmp/container.jsonl -o /tmp/container.json --quiet
+          python - <<'PY'
+          import json
+          report = json.load(open('/tmp/container.json'))
+          containers = report['containers']
+          assert containers['container_aware'] is True
+          assert containers['scope_count'] == 2
+          assert containers['collision_count'] == 1
+          PY
+      - name: Baseline drift suggestions
+        run: |
+          cabid build-baseline datasets/synthetic/example.jsonl datasets/synthetic/example.jsonl \
+            -o /tmp/drift-profile.json --min-sessions 2
+          cabid baseline-drift /tmp/drift-profile.json datasets/synthetic/example.jsonl \
+            -o /tmp/drift.json --min-support 1
+          python -c "import json;d=json.load(open('/tmp/drift.json'));assert d['applied'] is False"
       - name: Dashboard smoke test
         run: |
           python - <<'PY'

@@ -77,7 +77,8 @@ def _fit_profile(cases: list[dict]) -> dict | None:
 
 def evaluate(cases: list[dict], config: dict | None = None, profile: dict | None = None) -> dict:
     labels, temporal_preds, core_preds, wide_preds = [], [], [], []
-    groups = defaultdict(lambda: {"labels": [], "predictions": [], "core": []})
+    groups: dict[str, dict[str, list[int]]] = defaultdict(
+        lambda: {"labels": [], "predictions": [], "core": []})
     fitted = profile if profile is not None else _fit_profile(cases)
     thresholds = (config or {}).get("thresholds", {})
     temporal_cutoff = float(thresholds.get("suspicious", 0.55))

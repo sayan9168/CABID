@@ -1,0 +1,49 @@
+name: Feature request
+description: Propose a new detection surface, format, or integration.
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        CABID's scope is narrow on purpose: explainable, telemetry-aware behavioural
+        triage for Linux, with no runtime dependencies. Requests that fit that shape
+        move fast. Requests that need a model, a database, or a network call need a
+        stronger argument.
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What can an analyst not do today?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behaviour
+      description: Command, flag, report field, or module shape. Rough is fine.
+    validations:
+      required: true
+  - type: dropdown
+    id: layer
+    attributes:
+      label: Which layer
+      options:
+        - Telemetry ingestion (new event types / sources)
+        - Scoring or explanation
+        - Rules / process tree
+        - Output formats (JSON, MD, SARIF, STIX, ...)
+        - CLI / dashboard
+        - Documentation
+  - type: textarea
+    id: caveat
+    attributes:
+      label: How should this avoid overstating itself?
+      description: >
+        Every surface needs an honest caveat. What would this NOT prove if it fired?
+  - type: checkboxes
+    id: constraints
+    attributes:
+      label: Project constraints
+      options:
+        - label: This can be done with the Python standard library alone.
+        - label: This needs an optional extra rather than a core dependency.

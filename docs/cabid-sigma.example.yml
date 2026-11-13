@@ -1,0 +1,30 @@
+# Example Sigma rule, kept in-tree so the importer is exercised by `make smoke`
+# and by the docs. Translate it with:
+#
+#   cabid import-sigma docs/cabid-sigma.example.yml -o /tmp/imported-pack.json
+#   cabid analyze datasets/synthetic/example.jsonl -r /tmp/imported-pack.json
+#
+# The mapping is partial by design: read the `provenance.unsupported` list in the
+# output before trusting a translated rule.
+title: Service process spawned a shell from a staging directory
+id: 4d1f7c10-cab1-4e00-9a10-3f5b0c9d7e21
+status: experimental
+description: >-
+  A long-running service binary executed an interpreter from a writable path.
+  Written to exercise CABID's Sigma import, not to be deployed as-is.
+level: high
+tags:
+  - attack.execution
+  - attack.t1059.004
+logsource:
+  product: linux
+  category: process_creation
+detection:
+  selection:
+    Image|endswith:
+      - '/tmp'
+      - '/sh'
+      - '/bash'
+  condition: selection
+falsepositives:
+  - Maintenance scripts run by hand inside a container.

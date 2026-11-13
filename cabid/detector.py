@@ -10,6 +10,7 @@ from .baseline import novelty_features
 from .causal import causal_features
 from .completeness import completeness_features
 from .config import DEFAULT_CONFIG, config_digest, default_config, validate_config
+from .containers import analyse_scopes
 from .entities import entity_features
 from .rules import evaluate_rules, load_rules
 from .tree import process_tree
@@ -55,6 +56,7 @@ def analyze(events: list[dict], config: dict | None = None, profile: dict | None
     novelty = novelty_features(events, baseline_profile)
     entities = entity_features(events, policy, baseline_profile)
     tree = process_tree(events, baseline_profile)
+    scopes = analyse_scopes(events)
     active_rules = load_rules(None) if rules is None else rules
     rule_report = evaluate_rules(events, active_rules)
 
@@ -143,6 +145,7 @@ def analyze(events: list[dict], config: dict | None = None, profile: dict | None
         "novelty": novelty,
         "entities": entities,
         "tree": tree,
+        "containers": scopes,
         "rules": rule_report,
         "reasons": reasons,
         "event_count": len(events),
@@ -202,6 +205,101 @@ def analyze_windows(events: list[dict], window_seconds: float,
     }
 
 
+def explain_score(report: dict, config: dict | None = None) -> dict:
+    """Show the score as arithmetic, term by term.
+
+    The engine renormalizes over *active* components, so a weight in the config is
+    not the weight actually used. That surprises people reading a report, so this
+    returns every multiplication, the denominator, and the status decision, in the
+    order the code applies them.
+    """
+    cfg = validate_config(config or {})
+    thresholds = cfg["thresholds"]
+    components = report.get("components") or {}
+    weights = report.get("normalized_weights") or {}
+    steps = []
+    total = 0.0
+    for name in ("temporal", "causal", "sequence", "telemetry_gap", "novelty"):
+        value = float(components.get(name, 0.0))
+        weight = float(weights.get(name, 0.0))
+        product = weight * value
+        total += product
+        note = ""
+        if name == "novelty" and not report.get("baseline_used", True):
+            note = "inactive: no baseline profile, weight redistributed to other components"
+        steps.append({
+            "component": name,
+            "component_value": round(value, 6),
+            "normalized_weight": round(weight, 6),
+            "product": round(product, 6),
+            "share_of_score": round(product, 6),
+            "note": note,
+        })
+    denominator = sum(float(weights.get(name, 0.0)) for name in components)
+    steps.sort(key=lambda item: item["product"], reverse=True)
+    score = round(total, 6)
+    reported = report.get("anomaly_score")
+    completeness = report.get("completeness") or {}
+    status = report.get("status")
+    decision = []
+    if not completeness.get("telemetry_sufficient", True):
+        decision.append(
+            "telemetry_sufficient is false (completeness "
+            f"{completeness.get('completeness')} < {completeness.get('minimum_required_completeness')}), "
+            "so the score is not used and the status is INSUFFICIENT_EVIDENCE")
+    else:
+        decision.append(
+            f"score {score} vs suspicious >= {float(thresholds['suspicious'])}: "
+            + ("met" if score >= float(thresholds["suspicious"]) else "not met"))
+        if score >= float(thresholds["high"]):
+            decision.append(f"score {score} >= high {float(thresholds['high'])}: HIGH_RISK")
+        elif score >= float(thresholds["suspicious"]):
+            decision.append(f"score < high {float(thresholds['high'])}: SUSPICIOUS")
+        else:
+            decision.append("score below both thresholds: NO_ANOMALY_DETECTED")
+    return {
+        "formula": "anomaly_score = sum(normalized_weight_i * component_value_i) over active components",
+        "steps": steps,
+        "weight_denominator": round(denominator, 6),
+        "recomputed_score": score,
+        "reported_score": reported,
+        "recomputes_consistently": reported is not None and abs(float(reported) - score) <= 1e-6,
+        "thresholds": {"suspicious": float(thresholds["suspicious"]), "high": float(thresholds["high"])},
+        "decision": decision,
+        "final_status": status,
+        "semantics": SCORE_SEMANTICS,
+        "caveat": "Every term is a documented heuristic in [0,1]; the sum is not a probability of attack.",
+    }
+
+
+def render_score_explanation(explanation: dict) -> str:
+    """Plain-text arithmetic walkthrough for the CLI."""
+    lines = [
+        "Score arithmetic (highest term first)",
+        f"  formula: {explanation['formula']}",
+        "",
+        f"  {'component':<16}{'value':>9}{'weight':>9}{'product':>10}  note",
+    ]
+    for step in explanation["steps"]:
+        lines.append(
+            f"  {step['component']:<16}{step['component_value']:>9.4f}"
+            f"{step['normalized_weight']:>9.4f}{step['product']:>10.4f}  {step['note']}".rstrip())
+    lines.append(f"  {'sum':<16}{'':>9}{explanation['weight_denominator']:>9.4f}"
+                 f"{explanation['recomputed_score']:>10.4f}")
+    lines.append("")
+    lines.append(f"  weights sum to {explanation['weight_denominator']} before renormalization; "
+                 "the score is the plain sum of the products above.")
+    lines.append(f"  reported score {explanation['reported_score']} recomputes consistently: "
+                 f"{explanation['recomputes_consistently']}")
+    lines.append("")
+    for line in explanation["decision"]:
+        lines.append(f"  decision: {line}")
+    lines.append(f"  final status: {explanation['final_status']}")
+    lines.append("")
+    lines.append(f"  {explanation['caveat']}")
+    return "\n".join(lines) + "\n"
+
+
 def risk_level(score: float, config: dict | None = None) -> str:
     """Map a raw anomaly score to the configured risk band (no telemetry gate)."""
     thresholds = (config or {}).get("thresholds", DEFAULT_CONFIG["thresholds"])
@@ -214,4 +312,5 @@ def risk_level(score: float, config: dict | None = None) -> str:
     return "NO_ANOMALY_DETECTED"
 
 
-__all__ = ["analyze", "analyze_windows", "risk_level", "default_config", "STATUS_ORDER"]
+__all__ = ["analyze", "analyze_windows", "explain_score", "render_score_explanation",
+           "risk_level", "default_config", "STATUS_ORDER"]

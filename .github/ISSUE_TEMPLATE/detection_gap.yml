@@ -1,0 +1,45 @@
+name: Detection gap
+description: CABID missed activity it should have flagged, or flagged something benign.
+labels: ["detection"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this for scoring and rule quality. Describe the *behaviour*, not the
+        bytes: a rule is only as good as the pattern it encodes.
+  - type: dropdown
+    id: direction
+    attributes:
+      label: Direction
+      options:
+        - False negative (missed activity)
+        - False positive (benign activity flagged)
+        - Both
+    validations:
+      required: true
+  - type: textarea
+    id: behaviour
+    attributes:
+      label: The behaviour, in plain language
+      description: >
+        e.g. "a service account ran curl to a raw IP, then executed a file from
+        /dev/shm". Include the event types you would expect to see.
+    validations:
+      required: true
+  - type: textarea
+    id: current
+    attributes:
+      label: What CABID reported
+      description: Paste the `reasons`, `components`, and any `rules.findings` from the report.
+      render: json
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected instead
+  - type: checkboxes
+    id: attribution
+    attributes:
+      label: Reminder
+      options:
+        - label: I understand a rule match is a triage hint, not an attribution or a verdict.
+          required: true

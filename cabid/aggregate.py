@@ -12,6 +12,7 @@ from pathlib import Path
 
 from .ingest import read_jsonl
 from .normalize import EventError
+from .skew import estimate_skew
 
 
 class IngestError(ValueError):
@@ -50,8 +51,10 @@ def ingest_sources(paths: list[str | Path]) -> dict:
     total = sum(item["events"] for item in sources)
     unique = {(event["timestamp"], event["event_type"], event["process_id"],
                event["parent_process_id"], event.get("target", "")) for event in merged}
+    skew = estimate_skew(merged)
     return {
         "events": merged,
+        "clock_skew": skew,
         "sources": sources,
         "source_count": len(sources),
         "events_total": total,
@@ -61,10 +64,13 @@ def ingest_sources(paths: list[str | Path]) -> dict:
         "first_timestamp": merged[0]["timestamp"] if merged else None,
         "last_timestamp": merged[-1]["timestamp"] if merged else None,
         "notes": [
-            "Events are merged by timestamp; no cross-source clock correction is attempted.",
+            "Events are merged by timestamp; clock skew is estimated but never corrected automatically.",
             "Duplicate detection uses timestamp, type, pids, and target only.",
             "Overlapping time ranges may double-count the same real activity.",
-        ],
+        ] + ([f"Estimated clock offset for {name}: {offset:+.1f}s "
+              "(not applied; verify before trusting event order)."
+              for name, offset in sorted(skew.get("confident_offsets", {}).items())]
+             if skew.get("skew_detected") else []),
     }
 
 

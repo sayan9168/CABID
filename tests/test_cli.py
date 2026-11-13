@@ -1,5 +1,7 @@
 import json
 
+import pytest
+
 from cabid.cli import main
 
 
@@ -214,3 +216,144 @@ def test_missing_key_env_is_an_error(tmp_path, capsys):
     assert main(["analyze", "datasets/synthetic/example.jsonl", "--sign",
                  "--seal-key-env", "CABID_NO_SUCH_VAR", "-o", str(output)]) == 2
     assert "not set" in capsys.readouterr().err
+
+
+# --- command coverage: every subcommand must be reachable from the CLI ---------
+
+def test_import_sigma_and_export_stix_cli(tmp_path, capsys):
+    pack = tmp_path / "pack.json"
+    assert main(["import-sigma", "docs/cabid-sigma.example.yml", "-o", str(pack)]) == 0
+    provenance = json.loads(capsys.readouterr().out)
+    assert provenance["unsupported"] == []
+
+    assert main(["import-sigma", "docs/cabid-sigma.example.yml",
+                 "-o", str(tmp_path / "q.json"), "--quiet"]) == 0
+
+    report = tmp_path / "report.json"
+    assert main(["analyze", "datasets/synthetic/tree-example.jsonl",
+                 "-r", str(pack), "-o", str(report), "--quiet"]) == 0
+    assert json.loads(report.read_text())["rules"]["rule_count"] == 1
+
+    bundle = tmp_path / "bundle.json"
+    assert main(["export-stix", str(report), "-o", str(bundle), "--host", "web-01"]) == 0
+    assert json.loads(bundle.read_text())["spec_version"] == "2.1"
+    assert main(["export-stix", str(report), "-o", str(tmp_path / "q2.json"),
+                 "--quiet"]) == 0
+
+
+def test_baseline_drift_cli(tmp_path, capsys):
+    profile = tmp_path / "profile.json"
+    assert main(["build-baseline", "datasets/synthetic/example.jsonl",
+                 "datasets/synthetic/example.jsonl", "-o", str(profile),
+                 "--min-sessions", "2", "--quiet"]) == 0
+    assert main(["baseline-drift", str(profile), "datasets/synthetic/example.jsonl",
+                 "--min-support", "1"]) == 0
+    assert json.loads(capsys.readouterr().out)["applied"] is False
+
+    destination = tmp_path / "drift.json"
+    assert main(["baseline-drift", str(profile), "datasets/synthetic/example.jsonl",
+                 "--min-support", "1", "-o", str(destination)]) == 0
+    assert "profile unchanged" in capsys.readouterr().out
+    assert destination.exists()
+    assert main(["baseline-drift", str(profile), "datasets/synthetic/example.jsonl",
+                 "--min-support", "1", "-o", str(destination), "--quiet"]) == 0
+
+
+def test_drift_rejects_an_empty_input_file(tmp_path, capsys):
+    empty = tmp_path / "empty.jsonl"
+    empty.write_text("", encoding="utf-8")
+    profile = tmp_path / "profile.json"
+    assert main(["build-baseline", "datasets/synthetic/example.jsonl",
+                 "datasets/synthetic/example.jsonl", "-o", str(profile),
+                 "--min-sessions", "2", "--quiet"]) == 0
+    assert main(["baseline-drift", str(profile), str(empty)]) == 2
+    assert "no events found" in capsys.readouterr().err
+
+
+def test_explain_score_markdown_path(tmp_path, capsys):
+    report = tmp_path / "report.md"
+    assert main(["analyze", "datasets/synthetic/tree-example.jsonl", "--explain-score",
+                 "-f", "md", "-o", str(report), "--quiet"]) == 0
+    assert "Score arithmetic" in capsys.readouterr().err
+
+
+def test_timeline_markdown_and_text(tmp_path):
+    for fmt in ("md", "txt"):
+        destination = tmp_path / f"tl.{fmt}"
+        assert main(["timeline", "datasets/synthetic/tree-example.jsonl",
+                     "-f", fmt, "-o", str(destination)]) == 0
+        assert destination.stat().st_size > 0
+
+
+def test_seal_command_signs_and_verifies(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("CABID_TEST_KEY", "k" * 40)
+    report = tmp_path / "plain.json"
+    assert main(["analyze", "datasets/synthetic/example.jsonl",
+                 "-o", str(report), "--quiet"]) == 0
+    signed = tmp_path / "signed.json"
+    assert main(["seal", str(report), "-o", str(signed),
+                 "--key-env", "CABID_TEST_KEY"]) == 0
+    seal = json.loads(capsys.readouterr().out)
+    assert seal["format"] == "cabid-seal/1"
+    assert seal["hmac_sha256"]
+    # The seal must never be described as a digital signature.
+    assert "non-repudiable signature" in seal["note"]
+    assert main(["seal", str(signed), "--verify", "--key-env", "CABID_TEST_KEY",
+                 "--quiet"]) == 0
+
+
+def test_doctor_markdown_and_bad_input(tmp_path, capsys):
+    assert main(["doctor"]) == 0
+    assert "CABID" in capsys.readouterr().out
+    bad = tmp_path / "bad.jsonl"
+    bad.write_text('{"not":"an event"}\n', encoding="utf-8")
+    assert main(["doctor", "--input", str(bad)]) != 0
+
+
+def test_watch_on_a_growing_file(tmp_path):
+    stream = tmp_path / "live.jsonl"
+    stream.write_text("", encoding="utf-8")
+    with open(stream, "a", encoding="utf-8") as handle:
+        handle.write('{"timestamp":1,"event_type":"heartbeat","process_id":1,'
+                     '"parent_process_id":0,"process_name":"a"}\n')
+    assert main(["watch", str(stream), "--iterations", "1", "--interval", "0"]) == 0
+
+
+def test_init_config_refuses_to_overwrite_without_force(tmp_path, capsys):
+    destination = tmp_path / "config.json"
+    assert main(["init-config", "-o", str(destination)]) == 0
+    assert main(["init-config", "-o", str(destination)]) == 2
+    assert "already exists" in capsys.readouterr().err
+    assert main(["init-config", "-o", str(destination), "--force"]) == 0
+
+
+def test_unknown_command_is_an_error(capsys):
+    with pytest.raises(SystemExit):
+        main(["definitely-not-a-command"])
+
+
+def test_no_command_prints_help(capsys):
+    assert main([]) == 0
+    assert "usage: cabid" in capsys.readouterr().out
+
+
+def test_module_entry_point_exists():
+    """`python -m cabid` must work, including from the installed package."""
+    import subprocess
+    import sys
+
+    result = subprocess.run([sys.executable, "-m", "cabid", "--version"],
+                            capture_output=True, text=True)
+    assert result.returncode == 0
+    assert "CABID" in result.stdout
+
+
+def test_main_module_entry_point():
+    """`python -m cabid` must work without the console script on PATH."""
+    import runpy
+
+    import pytest
+
+    with pytest.raises(SystemExit) as exit_info:
+        runpy.run_module("cabid", run_name="__main__", alter_sys=True)
+    assert exit_info.value.code in (0, 2)
