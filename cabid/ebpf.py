@@ -214,7 +214,8 @@ def parse_line(line: str, *, source: str = "ebpf") -> dict:
         raise ParseError(f"{kind}: timestamp must be non-negative")
 
     if kind == "exec":
-        pid, ppid = _int(parts[2], kind, "pid"), _int(parts[3], kind, "old_pid")
+        pid = _int(parts[2], kind, "pid")
+        _int(parts[3], kind, "old_pid")  # validate wire field; it is not the PPID
         comm, path = parts[4], parts[5]
         # sched_process_exec.args->old_pid is the pre-exec thread id, not the
         # process parent. Parentage is supplied by sched_process_fork instead.
