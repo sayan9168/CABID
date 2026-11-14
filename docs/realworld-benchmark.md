@@ -26,7 +26,7 @@ On held-out ADFA-LD traces (4,372 benign validation traces, 746 attack traces):
 Threshold-free separation (AUC): CABID anomaly score **0.356**, syscall n-gram **0.675**.
 
 **CABID's headline behaviour on this corpus is poor, and the report says so.** A
-93.8% false-positive rate is unusable. That number is published here deliberately:
+95.3% false-positive rate is unusable. That number is published here deliberately:
 a benchmark that only reports favourable results is not a benchmark.
 
 ## Why it fails — the mechanism, not an excuse
