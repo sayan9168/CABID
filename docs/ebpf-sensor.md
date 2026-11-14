@@ -55,20 +55,19 @@ probe.
 
 | Probe | Emits | Purpose |
 | --- | --- | --- |
-| `sched_process_exec` | `process_exec` | Every `execve`, with the binary path |
+| `sched_process_exec` | `process_exec` | Every `execve`, with the binary path; parent PID remains unknown here because `old_pid` is not PPID |
 | `sched_process_fork` | `process_start` | Every fork, with child and parent pid |
 | `sched_process_exit` | `process_exit` | Every exit — this is what polling cannot see |
 | `sys_enter_connect` | `network_connect` | Outbound connection attempts |
-| `sys_enter_openat` | `file_write` | Path opened by `openat` |
+| `sys_enter_openat` | `file_write` | Write-capable opens only; not proof bytes changed |
 | `sys_enter_unlinkat` | `file_write` | Path removed by `unlinkat` |
 
 ### Deliberate omissions, and why
 
-- **`openat` does not distinguish read from write.** The flags are in `args->flags`
-  but mapping the flag set to "modifies disk" correctly needs care (`O_RDWR`,
-  `O_CREAT`, `O_TMPFILE`, `O_APPEND`), and getting it wrong either invents file writes
-  that never happened or loses real ones. It is mapped to `file_write` with that
-  caveat documented rather than guessed at silently.
+- **`openat` records write-capable opens, not confirmed writes.** The probe filters
+  read-only opens using `O_WRONLY`, `O_RDWR`, `O_CREAT`, `O_TRUNC`, and `O_APPEND`.
+  A successful open may still be followed by no write; `O_TMPFILE`, `openat2`, and
+  actual byte-change confirmation are not covered. Treat these as write-intent telemetry.
 - **`connect` carries no address.** `sockaddr` lives in userspace memory at that
   probe, and reading it safely needs a per-syscall map. The event records *that* a
   connection was attempted from a process, not where to. Address-level detection
@@ -157,7 +156,7 @@ since its output normalizes to ordinary CABID events.
   as a reviewed starting point, not a validated artifact.
 - **`comm` is truncated to 16 bytes by the kernel.** A process name longer than that
   is already truncated before CABID sees it; the original name is unrecoverable.
-- **No address for network events**, no file-read/write distinction, no payloads.
+- **No address for network events**, no file-read telemetry, no payloads.
 - **No ring-buffer or map aggregation.** Output is plain stdio text, so very high
   event rates on a busy host will lose events in the pipe rather than buffering them.
   For a truly high-rate host, add a `BPF_MAP`-based aggregation step — not implemented.
