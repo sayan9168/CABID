@@ -4,7 +4,7 @@
 
 CABID combines temporal activity, conservative process ancestry checks, and telemetry-class completeness over normalized event streams. It reports insufficient evidence when required event classes are absent.
 
-> Research status: alpha prototype (v0.7.0). Novelty and real-world detection performance are not established. Scores are heuristics, not probabilities.
+> Research status: alpha research prototype (v0.8.0). Novelty and real-world detection performance are not established. Scores are heuristics, not probabilities.
 
 ## Features
 
@@ -218,7 +218,7 @@ cabid corpus fetch adfa-ld        # verify + extract + cache
 cabid benchmark-real --corpus-cache ~/.cache/cabid -o results/adfa.json -f md
 ```
 
-The published result is deliberately unfavourable: **93.8% false-positive rate**, and
+The published result is deliberately unfavourable: **95.3% false-positive rate**, and
 an anomaly-score AUC of **0.356** (below chance) once the telemetry gate is disabled.
 The report's ablation explains why — attack traces are `socketcall`-dominated, so they
 show *fewer* event classes and the completeness gate reads that as worse telemetry.
