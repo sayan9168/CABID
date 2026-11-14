@@ -324,7 +324,8 @@ def capture(output: str | Path, *, duration: float = 30.0,
     if raw_destination is not None:
         raw_destination.parent.mkdir(parents=True, exist_ok=True)
 
-    event_count, event_types = 0, {}
+    event_count = 0
+    event_types: dict[str, int] = {}
     errors: list[dict] = []
     buffer = b""
     started = time.monotonic()
