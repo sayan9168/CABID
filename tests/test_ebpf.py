@@ -77,6 +77,11 @@ def test_read_first_tolerates_missing_files():
 
 # ------------------------------------------------------------------- script ----
 
+def test_openat_probe_filters_read_only_opens():
+    assert "args->flags" in BPFTRACE_SCRIPT
+    assert "(args->flags & 3) != 0" in BPFTRACE_SCRIPT
+
+
 def test_script_declares_its_format_and_probes():
     assert SENSOR_FORMAT in BPFTRACE_SCRIPT
     for probe in ("sched_process_exec", "sched_process_fork", "sched_process_exit",
@@ -103,7 +108,7 @@ def test_write_script_materializes_reviewable_text(tmp_path):
 # ------------------------------------------------------------------- parser ----
 
 @pytest.mark.parametrize("line,event_type,pid,parent,target", [
-    (EXEC, "process_exec", 4242, 1, "/usr/sbin/nginx"),
+    (EXEC, "process_exec", 4242, 0, "/usr/sbin/nginx"),
     (FORK, "process_start", 4243, 4242, ""),
     (EXIT, "process_exit", 4242, 0, ""),
     (CONNECT, "network_connect", 4242, 0, ""),
@@ -118,6 +123,11 @@ def test_parse_line_maps_each_probe(line, event_type, pid, parent, target):
     assert event["target"] == target
     assert event["timestamp"] == 1760000000.0 or event["timestamp"] >= 1760000000.0
     assert event["source"] == "ebpf"
+
+
+def test_exec_does_not_mistake_old_pid_for_parent_pid():
+    # In sched_process_exec, old_pid is the pre-exec thread id, not the PPID.
+    assert parse_line(EXEC)["parent_process_id"] == 0
 
 
 def test_exec_sets_the_executable_and_others_do_not():
