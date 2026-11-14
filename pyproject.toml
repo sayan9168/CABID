@@ -41,6 +41,7 @@ Issues = "https://github.com/sayan9168/CABID/issues"
 
 [project.scripts]
 cabid = "cabid.cli:main"
+cabid-research = "cabid.advanced:main"
 
 [tool.setuptools.packages.find]
 include = ["cabid*"]
