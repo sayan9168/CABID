@@ -33,6 +33,8 @@ from .alerting import (
 )
 from .ebpf import (
     capabilities as sensor_capabilities,
+    capture as capture_sensor,
+    SensorError,
     parse_stream as parse_sensor_stream,
     write_script as write_sensor_script,
 )
@@ -254,13 +256,16 @@ def _build_parser() -> argparse.ArgumentParser:
         "ebpf",
         help="kernel sensor: check capability, emit the probe program, parse its output")
     ebpf.add_argument("action", nargs="?", default="check",
-                      choices=("check", "script", "parse"))
+                      choices=("check", "script", "parse", "capture"))
     ebpf.add_argument("input", nargs="?", help="sensor output file (for 'parse')")
     ebpf.add_argument("--output", "-o", help="write the script or normalized JSONL here")
     ebpf.add_argument("--bpftrace", default="bpftrace", help="path to the bpftrace binary")
     ebpf.add_argument("--keep-errors", action="store_true",
                       help="record unparseable lines instead of stopping")
     ebpf.add_argument("--report", help="write a parse summary as JSON")
+    ebpf.add_argument("--duration", type=float, default=30.0,
+                      help="capture duration in seconds (capture action; max 3600)")
+    ebpf.add_argument("--raw-output", help="also save the original bpftrace text stream")
 
     alert = sub.add_parser(
         "alert",
@@ -404,6 +409,23 @@ def _load_analyze_events(args) -> tuple[list[dict], dict]:
 
 
 def _cmd_ebpf(args) -> int:
+    if args.action == "capture":
+        if not args.output:
+            print("error: --output is required for 'capture'", file=sys.stderr)
+            return 2
+        try:
+            summary = capture_sensor(args.output, duration=args.duration,
+                                     raw_output=args.raw_output, bpftrace=args.bpftrace)
+        except (SensorError, ValueError, OSError) as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        if args.report:
+            report_path = Path(args.report)
+            report_path.parent.mkdir(parents=True, exist_ok=True)
+            report_path.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n",
+                                   encoding="utf-8")
+        print(json.dumps(summary, indent=2, sort_keys=True))
+        return 0
     if args.action == "check":
         report = sensor_capabilities(args.bpftrace)
         print(json.dumps(report, indent=2, sort_keys=True))

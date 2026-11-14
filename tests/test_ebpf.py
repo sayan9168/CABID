@@ -232,3 +232,42 @@ def test_run_refuses_when_the_sensor_cannot_run(monkeypatch):
                                                     "reasons": ["no bpftrace"]})
     with pytest.raises(SensorError, match="cannot run here: no bpftrace"):
         run("/tmp/sensor.bt")
+
+
+
+def test_capture_writes_normalized_events_with_fake_bpftrace(tmp_path, monkeypatch):
+    import sys
+    from cabid.ebpf import capture
+
+    fake = tmp_path / "fake-bpftrace"
+    fake.write_text(
+        "#!" + sys.executable + "\n"
+        "import sys\n"
+        "print('cabid-bpf/1', flush=True)\n"
+        "print('exec\\t1760000000\\t4242\\t1\\tnginx\\t/usr/sbin/nginx', flush=True)\n",
+        encoding="utf-8")
+    fake.chmod(0o755)
+    monkeypatch.setattr("cabid.ebpf.capabilities", lambda _binary="bpftrace": {
+        "available": True, "bpftrace": str(fake), "reasons": []})
+    output = tmp_path / "events.jsonl"
+    raw = tmp_path / "sensor.log"
+    result = capture(output, duration=2, raw_output=raw, bpftrace=str(fake))
+    import json
+    events = [json.loads(line) for line in output.read_text().splitlines()]
+    assert result["events_written"] == 1
+    assert events[0]["event_type"] == "process_exec"
+    assert events[0]["source"] == "ebpf"
+    assert "cabid-bpf/1" in raw.read_text()
+
+
+def test_capture_refuses_same_raw_and_normalized_output(tmp_path):
+    from cabid.ebpf import capture
+    same = tmp_path / "same.txt"
+    with pytest.raises(ValueError, match="different files"):
+        capture(same, raw_output=same)
+
+
+def test_capture_rejects_invalid_duration(tmp_path):
+    from cabid.ebpf import capture
+    with pytest.raises(ValueError, match="at most 3600"):
+        capture(tmp_path / "events.jsonl", duration=3601)

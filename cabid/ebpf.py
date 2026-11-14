@@ -33,8 +33,14 @@ that does and does not establish.
 """
 from __future__ import annotations
 
+import json
+import os
+import selectors
 import shutil
+import signal
 import subprocess
+import tempfile
+import time
 from pathlib import Path
 from typing import Iterable, Iterator
 
@@ -293,3 +299,151 @@ def run(script_path: str | Path, *, bpftrace: str = "bpftrace",
             f"sensor exited with {completed.returncode}: "
             f"{(completed.stderr or '').strip()[:500]}")
     return completed.stdout.splitlines()
+
+
+def capture(output: str | Path, *, duration: float = 30.0,
+            raw_output: str | Path | None = None,
+            bpftrace: str = "bpftrace") -> dict:
+    """Capture live kernel events for a bounded duration and write normalized JSONL.
+
+    The host capability check is mandatory; this function never falls back to
+    procfs. It preserves raw output when requested and reports malformed lines.
+    """
+    from .normalize import EventError, normalize_event
+
+    if not 0 < duration <= 3600:
+        raise ValueError("duration must be greater than 0 and at most 3600 seconds")
+    destination = Path(output)
+    raw_destination = Path(raw_output) if raw_output else None
+    if raw_destination is not None and raw_destination.resolve() == destination.resolve():
+        raise ValueError("raw_output and output must be different files")
+    caps = capabilities(bpftrace)
+    if not caps["available"]:
+        raise SensorError("kernel sensor cannot run here: " + "; ".join(caps["reasons"]))
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    if raw_destination is not None:
+        raw_destination.parent.mkdir(parents=True, exist_ok=True)
+
+    event_count, event_types = 0, {}
+    errors: list[dict] = []
+    buffer = b""
+    started = time.monotonic()
+    stop_reason = "process_exit"
+
+    def consume(line: bytes, event_file, raw_file) -> None:
+        nonlocal event_count
+        text = line.decode("utf-8", errors="replace").rstrip("\r")
+        if raw_file is not None:
+            raw_file.write(text + "\n")
+        if not text or text.strip() == SENSOR_FORMAT:
+            return
+        try:
+            event = normalize_event(parse_line(text, source="ebpf"))
+        except (ParseError, EventError) as exc:
+            if len(errors) < 20:
+                errors.append({"error": str(exc), "line": text[:500]})
+            return
+        event_file.write(json.dumps(event, sort_keys=True) + "\n")
+        event_count += 1
+        event_types[event["event_type"]] = event_types.get(event["event_type"], 0) + 1
+
+    with tempfile.TemporaryDirectory(prefix="cabid-ebpf-") as temp_dir:
+        script_path = write_script(Path(temp_dir) / "sensor.bt")
+        stderr_file = tempfile.TemporaryFile(mode="w+b")
+        process = None
+        try:
+            try:
+                process = subprocess.Popen(
+                    [str(caps["bpftrace"]), str(script_path)],
+                    stdout=subprocess.PIPE, stderr=stderr_file, bufsize=0)
+            except OSError as exc:
+                raise SensorError(f"could not start bpftrace: {exc}") from exc
+            if process.stdout is None:
+                raise SensorError("bpftrace stdout pipe was not created")
+            fd = process.stdout.fileno()
+            os.set_blocking(fd, False)
+            selector = selectors.DefaultSelector()
+            selector.register(process.stdout, selectors.EVENT_READ)
+            with destination.open("w", encoding="utf-8") as event_file:
+                raw_file = raw_destination.open("w", encoding="utf-8") if raw_destination else None
+                try:
+                    deadline = started + duration
+                    while process.poll() is None:
+                        remaining = deadline - time.monotonic()
+                        if remaining <= 0:
+                            stop_reason = "duration_elapsed"
+                            break
+                        for _key, _mask in selector.select(min(remaining, 0.25)):
+                            try:
+                                chunk = os.read(fd, 65536)
+                            except BlockingIOError:
+                                continue
+                            if not chunk:
+                                break
+                            buffer += chunk
+                            while b"\n" in buffer:
+                                line, buffer = buffer.split(b"\n", 1)
+                                consume(line, event_file, raw_file)
+                    if process.poll() is None:
+                        process.send_signal(signal.SIGINT)
+                        try:
+                            process.wait(timeout=3.0)
+                        except subprocess.TimeoutExpired:
+                            process.terminate()
+                            try:
+                                process.wait(timeout=2.0)
+                            except subprocess.TimeoutExpired:
+                                process.kill()
+                                process.wait()
+                    # Drain any bytes already queued by the child.
+                    while True:
+                        try:
+                            chunk = os.read(fd, 65536)
+                        except BlockingIOError:
+                            break
+                        if not chunk:
+                            break
+                        buffer += chunk
+                        while b"\n" in buffer:
+                            line, buffer = buffer.split(b"\n", 1)
+                            consume(line, event_file, raw_file)
+                    if buffer:
+                        consume(buffer, event_file, raw_file)
+                        buffer = b""
+                    event_file.flush()
+                    if raw_file is not None:
+                        raw_file.flush()
+                finally:
+                    if raw_file is not None:
+                        raw_file.close()
+                    selector.close()
+            return_code = process.wait()
+            stderr_file.seek(0)
+            stderr_text = stderr_file.read().decode("utf-8", errors="replace").strip()
+            if return_code not in (0, -signal.SIGINT, 128 + signal.SIGINT):
+                raise SensorError(f"bpftrace exited with {return_code}: {stderr_text[:1000]}")
+        finally:
+            if process is not None and process.poll() is None:
+                process.kill()
+                process.wait()
+            stderr_file.close()
+
+    return {
+        "format": "cabid-ebpf-capture/1",
+        "output": str(destination),
+        "raw_output": str(raw_destination) if raw_destination else None,
+        "duration_requested_seconds": duration,
+        "duration_observed_seconds": round(time.monotonic() - started, 3),
+        "stop_reason": stop_reason,
+        "events_written": event_count,
+        "event_types": dict(sorted(event_types.items())),
+        "parse_or_normalization_errors": len(errors),
+        "error_examples": errors,
+        "sensor_exit_code": return_code,
+        "limitations": [
+            "The bpftrace program must be validated on this exact kernel and bpftrace version.",
+            "An empty event stream is not evidence of benign activity.",
+            "Kernel comm is truncated and current probes do not capture network addresses.",
+            "The openat probe records open intent, not confirmed file modification.",
+        ],
+    }

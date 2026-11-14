@@ -8,8 +8,12 @@ the event when it happens.
 ```bash
 cabid ebpf check                                  # can this host run it?
 cabid ebpf script --output cabid-sensor.bt        # review the program
-bpftrace cabid-sensor.bt | tee sensor.log         # run it (as root)
+bpftrace cabid-sensor.bt | tee sensor.log         # manual capture (as root)
 cabid ebpf parse sensor.log --output events.jsonl # normalize
+
+# Or use a bounded capture session:
+cabid ebpf capture --duration 30 --output events.jsonl \
+    --raw-output sensor.log --report capture-report.json
 ```
 
 ## Verification status — read this first
@@ -121,6 +125,16 @@ Each failed prerequisite is listed, not just the first, and the command exits 1.
 **never falls back to polling silently** — the two sensors have different blind spots,
 and an operator who believes eBPF is running when it is not has a false picture of
 coverage.
+
+## Bounded capture
+
+`cabid ebpf capture` checks prerequisites, runs the sensor for a maximum of
+3600 seconds, sends SIGINT when the duration expires, and writes normalized JSONL.
+Use `--raw-output` to preserve the original bpftrace stream and `--report` to
+save event counts and parse/normalization errors. A fake bpftrace executable tests
+the complete subprocess-to-JSONL path in CI; CI does not attach to a real kernel.
+Live probe compatibility, loss rate, and overhead remain unverified until tested
+on the target host.
 
 ## Using it with the rest of CABID
 
