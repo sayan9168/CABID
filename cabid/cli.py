@@ -52,6 +52,12 @@ from .normalize import EventError
 from .novelty import NoveltyError, drift as drift_report, validate as validate_baseline
 from .policy import PolicyError, evaluate_policy, load_policy
 from .realworld import run_adfa_benchmark
+from .host_benchmark import (
+    collect_host_events,
+    default_config,
+    render_markdown as render_host_benchmark_markdown,
+    run_host_benchmark,
+)
 from .rules import RuleError, load_rules
 from .executor import ExecutionError, dry_run, execute_plan
 from .response import ACTIONS, ResponseError, build_plan, render_plan, write_plan
@@ -364,6 +370,34 @@ def _build_parser() -> argparse.ArgumentParser:
     real.add_argument("--format", "-f", choices=("json", "md"), default="json")
     real.add_argument("--require-verified", action="store_true",
                       help="refuse to run unless the cached archive matches its pinned digest")
+
+    host_bench = sub.add_parser(
+        "benchmark-host",
+        help="measure CABID on live telemetry from this host")
+    host_bench_sub = host_bench.add_subparsers(dest="host_bench_command", required=True)
+    collect = host_bench_sub.add_parser(
+        "collect", help="collect labeled host telemetry for one scenario")
+    collect.add_argument("--scenario", required=True,
+                         help="scenario name (e.g. benign-baseline, nmap-scan)")
+    collect.add_argument("--label", required=True, choices=("benign", "attack"),
+                         help="ground-truth label for this scenario")
+    collect.add_argument("--duration", type=float, default=60.0,
+                         help="collection duration in seconds")
+    collect.add_argument("--interval", type=float, default=2.0,
+                         help="polling interval in seconds")
+    collect.add_argument("--output", "-o", required=True,
+                         help="output JSONL path")
+    collect.add_argument("--proc-root", default="/proc",
+                         help="procfs mount point (default /proc)")
+    run = host_bench_sub.add_parser(
+        "run", help="score labeled sessions and publish a benchmark report")
+    run.add_argument("--sessions-dir", required=True,
+                     help="directory of labeled session JSONL files")
+    run.add_argument("--output", "-o", default="results/host-benchmark.json")
+    run.add_argument("--format", "-f", choices=("json", "md"), default="json")
+    run.add_argument("--config", "-c", help="analysis configuration JSON")
+    run.add_argument("--calibration-percentile", type=float, default=0.99)
+    run.add_argument("--min-benign-sessions", type=int, default=3)
 
     doctor = sub.add_parser("doctor", help="check environment, telemetry sources and configuration")
     doctor.add_argument("--input", help="optional JSONL file to validate")
@@ -757,6 +791,58 @@ def _cmd_benchmark_real(args) -> int:
         markdown.write_text(_realworld_markdown(report), encoding="utf-8")
     print(json.dumps(report, indent=2, sort_keys=True))
     return 0
+
+
+def _cmd_benchmark_host(args) -> int:
+    if args.host_bench_command == "collect":
+        try:
+            count = collect_host_events(
+                args.output,
+                scenario=args.scenario,
+                label=args.label,
+                duration=args.duration,
+                interval=args.interval,
+                proc_root=args.proc_root,
+            )
+        except (ValueError, OSError) as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        print(json.dumps(
+            {"format": "cabid-host-collect/1",
+             "scenario": args.scenario,
+             "label": args.label,
+             "duration_seconds": args.duration,
+             "events_written": count,
+             "output": args.output}, indent=2, sort_keys=True))
+        return 0
+
+    if args.host_bench_command == "run":
+        config = load_config(args.config) if args.config else default_config()
+        try:
+            report = run_host_benchmark(
+                args.sessions_dir,
+                output=args.output,
+                config=config,
+                calibration_percentile=args.calibration_percentile,
+                min_benign_sessions=args.min_benign_sessions,
+            )
+        except (ValueError, OSError) as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        destination = Path(args.output)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_text(
+            json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        if args.format == "md":
+            markdown = Path(args.output).with_suffix(".md")
+            markdown.parent.mkdir(parents=True, exist_ok=True)
+            markdown.write_text(render_host_benchmark_markdown(report), encoding="utf-8")
+        print(json.dumps(report, indent=2, sort_keys=True))
+        return 0
+
+    print(f"error: unknown benchmark-host command {args.host_bench_command}",
+          file=sys.stderr)
+    return 1
 
 
 def _cmd_analyze(args) -> int:
@@ -1223,6 +1309,8 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_corpus(args)
         if args.command == "benchmark-real":
             return _cmd_benchmark_real(args)
+        if args.command == "benchmark-host":
+            return _cmd_benchmark_host(args)
         if args.command == "benchmark":
             report = run_benchmark(args.output, args.seed, args.per_class,
                                    config=load_config(args.config),

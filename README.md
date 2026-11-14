@@ -50,6 +50,10 @@ CABID combines temporal activity, conservative process ancestry checks, and tele
   public corpus (ADFA-LD: 5,951 traces), reporting precision/recall/FPR with Wilson
   intervals, a threshold-free ROC-AUC, and a gate-disabled ablation — including the
   unfavourable result
+- **Real-host benchmark** (`cabid benchmark-host`): collect labeled telemetry from
+  a live Linux host (procfs polling), build a benign baseline, score attack and
+  benign sessions, and publish precision/recall/FPR with Wilson intervals —
+  including unfavourable results. See [docs/host-benchmark.md](docs/host-benchmark.md).
 - **Data-driven calibration** (`cabid calibrate`): percentile floor plus median/MAD
   rate limits over benign sessions, with the implied false-positive budget stated
 - **Baseline validation and drift** (`cabid validate-baseline`, `cabid drift-report`):
@@ -331,6 +335,7 @@ file_write, network_connect, process_exit, heartbeat. See docs/event-schema.md.
 | docs/linux-collector.md | procfs collector limits |
 | docs/benchmark.md | synthetic benchmark caveats |
 | docs/realworld-benchmark.md | ADFA-LD benchmark: method, the unfavourable result, and why |
+| docs/host-benchmark.md | real-host benchmark: measure on live telemetry |
 | docs/calibration.md | deriving thresholds from benign sessions |
 | docs/novelty.md | baseline validation and drift tracking |
 | docs/fleet.md | multi-host aggregation, silent-host accounting |
