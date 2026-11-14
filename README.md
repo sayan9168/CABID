@@ -350,3 +350,8 @@ as safety. Use only on systems and logs you own or are authorized to analyze.
 ## License
 
 MIT. See LICENSE.
+
+
+## Advanced research utilities
+
+Install the package and use `cabid-research --help` for SHA-256 file integrity snapshots, sensor-health hints, heuristic event correlation, local IOC matching, evidence explanations, static benchmark dashboards, and reproducibility manifests. See [advanced feature documentation](docs/advanced-features.md). These are research utilities, not production EDR controls.
