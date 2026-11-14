@@ -12,7 +12,10 @@ adds offline-first utilities without changing the core detector's event schema.
 - \`cabid-research intel-match events.jsonl indicators.json\`: exact matching against local user-supplied IP/domain/SHA-256 indicators.
 - \`cabid-research explain report.json\`: evidence-oriented explanation summary.
 - \`cabid-research benchmark-dashboard results.json -o dashboard.html\`: static HTML view of an existing benchmark JSON.
-- \`cabid-research reproduce events.jsonl -o manifest.json\`: input hashes and environment manifest.
+- `cabid-research reproduce events.jsonl -o manifest.json`: input hashes and environment manifest.
+- `cabid-research network-attribution events.jsonl`: map supplied socket metadata to process IDs.
+- `cabid-research robustness-audit events.jsonl`: check malformed, oversized and unsafe input records.
+- `cabid-research performance-probe events.jsonl`: measure JSONL parsing throughput and Python traced memory.
 
 IOC file schema: \`{"ips":[],"domains":[],"sha256":[]}\`.
 
