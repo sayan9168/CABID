@@ -5,7 +5,7 @@
   executed against a live kernel** in this repository. See
   [ebpf-sensor.md](ebpf-sensor.md) for exactly what is and is not verified.
 - **The real-world benchmark does not flatter CABID.** On ADFA-LD it reports a
-  93.8% false-positive rate and an anomaly-score AUC of 0.356 (below chance) with the
+  95.3% false-positive rate and an anomaly-score AUC of 0.356 (below chance) with the
   telemetry gate disabled. Those numbers are published because a benchmark that only
   reports favourable results is not a benchmark. The corpus is 2013 syscall traces
   with no timestamps, pids, or paths, so it cannot exercise ancestry, lifecycle, or
