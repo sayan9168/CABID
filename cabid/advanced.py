@@ -238,6 +238,88 @@ def reproducibility_manifest(inputs: Iterable[str], output: str) -> dict[str, An
     return result
 
 
+
+def network_attribution(input_path: str) -> dict[str, Any]:
+    """Summarize socket metadata already present in events; does not sniff packets."""
+    rows = _jsonl(input_path)
+    connections = []
+    for row in rows:
+        kind = str(row.get("event_type", ""))
+        if kind not in {"network_connect", "network_accept", "socket_connect"}:
+            continue
+        remote = row.get("remote_ip") or row.get("destination_ip") or row.get("peer_ip")
+        if not remote:
+            continue
+        connections.append({
+            "timestamp": row.get("timestamp"),
+            "process_id": row.get("process_id"),
+            "process_name": row.get("process_name"),
+            "executable": row.get("executable"),
+            "local_ip": row.get("local_ip"),
+            "local_port": row.get("local_port"),
+            "remote_ip": remote,
+            "remote_port": row.get("remote_port") or row.get("destination_port"),
+            "protocol": row.get("protocol"),
+            "source": row.get("source"),
+        })
+    return {"schema": "cabid-network-attribution/1", "connection_count": len(connections),
+            "connections": connections,
+            "note": "Attribution is limited to socket metadata supplied by the event source; current basic eBPF connect probe does not capture addresses."}
+
+
+def robustness_audit(input_path: str, max_line_bytes: int = 1024 * 1024) -> dict[str, Any]:
+    """Non-destructive malformed/adversarial-input checks for a JSONL corpus."""
+    if max_line_bytes < 128:
+        raise ValueError("max line bytes must be at least 128")
+    total = malformed = oversized = non_object = suspicious_fields = 0
+    findings = []
+    with Path(input_path).open("rb") as handle:
+        for number, raw in enumerate(handle, 1):
+            total += 1
+            if len(raw) > max_line_bytes:
+                oversized += 1
+                findings.append({"line": number, "issue": "oversized_line", "bytes": len(raw)})
+                continue
+            try:
+                value = json.loads(raw)
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                malformed += 1
+                findings.append({"line": number, "issue": "invalid_json"})
+                continue
+            if not isinstance(value, dict):
+                non_object += 1
+                findings.append({"line": number, "issue": "non_object_json"})
+                continue
+            for key in ("target", "executable", "process_name"):
+                field = value.get(key)
+                if isinstance(field, str) and ("\x00" in field or len(field) > 8192):
+                    suspicious_fields += 1
+                    findings.append({"line": number, "issue": "unsafe_or_oversized_field", "field": key})
+    return {"schema": "cabid-robustness-audit/1", "lines": total,
+            "malformed_json": malformed, "oversized_lines": oversized,
+            "non_object_json": non_object, "suspicious_fields": suspicious_fields,
+            "findings": findings,
+            "note": "Input hygiene checks only; this is not a penetration test or proof of detector robustness."}
+
+
+def performance_probe(input_path: str) -> dict[str, Any]:
+    """Measure JSONL parsing throughput and Python peak traced allocation."""
+    import tracemalloc
+    started = time.perf_counter()
+    tracemalloc.start()
+    rows = _jsonl(input_path)
+    elapsed = max(time.perf_counter() - started, 1e-9)
+    _current, peak = tracemalloc.get_traced_memory()
+    tracemalloc.stop()
+    size = Path(input_path).stat().st_size
+    return {"schema": "cabid-performance-probe/1", "events": len(rows),
+            "input_bytes": size, "elapsed_seconds": round(elapsed, 6),
+            "events_per_second": round(len(rows) / elapsed, 2),
+            "mb_per_second": round(size / (1024 * 1024) / elapsed, 3),
+            "python_peak_traced_bytes": peak,
+            "note": "Measures JSONL parsing in this Python process only, not kernel sensor overhead or end-to-end detection latency."}
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="cabid-research", description="Offline CABID research utilities")
     sub = parser.add_subparsers(dest="action", required=True)
@@ -249,6 +331,9 @@ def main(argv: list[str] | None = None) -> int:
     exp = sub.add_parser("explain"); exp.add_argument("report")
     dash = sub.add_parser("benchmark-dashboard"); dash.add_argument("input"); dash.add_argument("-o", "--output", required=True)
     repro = sub.add_parser("reproduce"); repro.add_argument("inputs", nargs="+"); repro.add_argument("-o", "--output", required=True)
+    net = sub.add_parser("network-attribution"); net.add_argument("input")
+    robust = sub.add_parser("robustness-audit"); robust.add_argument("input"); robust.add_argument("--max-line-bytes", type=int, default=1024 * 1024)
+    perf = sub.add_parser("performance-probe"); perf.add_argument("input")
     args = parser.parse_args(argv)
     try:
         if args.action == "fim-snapshot": _write(fim_snapshot(args.root, args.output), None)
@@ -259,6 +344,9 @@ def main(argv: list[str] | None = None) -> int:
         elif args.action == "explain": _write(explain(args.report), None)
         elif args.action == "benchmark-dashboard": benchmark_dashboard(args.input, args.output); print(f"wrote {args.output}")
         elif args.action == "reproduce": _write(reproducibility_manifest(args.inputs, args.output), None)
+        elif args.action == "network-attribution": _write(network_attribution(args.input), None)
+        elif args.action == "robustness-audit": _write(robustness_audit(args.input, args.max_line_bytes), None)
+        elif args.action == "performance-probe": _write(performance_probe(args.input), None)
     except (OSError, ValueError, json.JSONDecodeError) as exc:
         print(f"cabid-research: error: {exc}", file=sys.stderr)
         return 2
