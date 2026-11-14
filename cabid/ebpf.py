@@ -86,8 +86,15 @@ tracepoint:syscalls:sys_enter_connect {
 }
 
 tracepoint:syscalls:sys_enter_openat {
-    printf("open\t%llu\t%d\t%d\t%s\t%s\n",
-           nsecs / 1000000000, pid, tid, comm, str(args->filename));
+    /* O_WRONLY=1, O_RDWR=2, O_CREAT=64, O_TRUNC=512, O_APPEND=1024.
+     * Read-only opens are not file-write events. This records write-capable
+     * opens, not proof that bytes were ultimately changed.
+     */
+    if ((args->flags & 3) != 0 || (args->flags & 64) != 0 ||
+        (args->flags & 512) != 0 || (args->flags & 1024) != 0) {
+        printf("open\t%llu\t%d\t%d\t%s\t%s\n",
+               nsecs / 1000000000, pid, tid, comm, str(args->filename));
+    }
 }
 
 tracepoint:syscalls:sys_enter_unlinkat {
@@ -209,7 +216,10 @@ def parse_line(line: str, *, source: str = "ebpf") -> dict:
     if kind == "exec":
         pid, ppid = _int(parts[2], kind, "pid"), _int(parts[3], kind, "old_pid")
         comm, path = parts[4], parts[5]
-        return _event(timestamp, "process_exec", pid, ppid, comm, path, source)
+        # sched_process_exec.args->old_pid is the pre-exec thread id, not the
+        # process parent. Parentage is supplied by sched_process_fork instead.
+        # Keep it unknown here rather than corrupting the causal process tree.
+        return _event(timestamp, "process_exec", pid, 0, comm, path, source)
     if kind == "fork":
         child, parent = _int(parts[2], kind, "child_pid"), _int(parts[3], kind, "parent_pid")
         return _event(timestamp, "process_start", child, parent, parts[4], "", source)
