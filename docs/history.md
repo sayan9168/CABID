@@ -19,6 +19,26 @@ on first use, including parent directories.
     cabid history --show 4              # stored summary for one run
     cabid history --compare 3 7         # diff two stored runs
 
+## Stats and retention
+
+    cabid history --stats                      # counts, time span, file size
+    cabid history --stats --format json
+    cabid history --prune --keep 20            # dry run: prints what it would drop
+    cabid history --prune --keep 20 --apply    # actually delete
+    cabid history --prune --older-than-days 90 --keep 5 --apply --vacuum
+
+Pruning needs at least one rule (`--keep`, `--older-than-days`, or both) and
+refuses to guess. It is a **dry run unless `--apply` is passed**, because a
+deletion command that can be run by accident is a data-loss bug waiting for a
+typo. The newest `--keep` runs are always retained, even when they are old enough
+to match the age rule, so "keep 10, drop anything over 30 days" cannot empty the
+table. `--vacuum` compacts the file afterwards on a fresh connection.
+
+`--stats` reports the run count, containment count, status distribution, time
+span, highest score, per-rule hit counts, schema version, and file size — all
+derived from stored summaries. It stores nothing new and prints no paths,
+addresses, or command lines.
+
 ## Compare an analysis against history
 
     cabid analyze events.jsonl --compare-history 3 --format md -o report.md
@@ -47,3 +67,12 @@ so the history database is materially safer to retain than the input logs.
 - Comparisons are metric-level. Two runs with identical metrics can still differ
   in the events behind them.
 - Deleting the database loses trend context; back it up if a study depends on it.
+- Pruning is irreversible from CABID's side. Deleted rows are gone unless you
+  copied the file first; `--vacuum` additionally makes them unrecoverable from the
+  file's free pages.
+- `--older-than-days` uses `created_at`, which is written from the analyst's clock
+  at record time. A run recorded with a skewed clock is pruned (or kept) by that
+  wrong timestamp.
+- `--stats` counts rule ids recorded in the stored summary. Runs stored before
+  rule ids were added to the summary count as zero, so historical hit counts can
+  understate reality.

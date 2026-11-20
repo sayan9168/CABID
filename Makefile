@@ -60,6 +60,13 @@ smoke: install ## end-to-end CLI smoke test over the bundled datasets
 	$(CABID) analyze datasets/synthetic/tree-example.jsonl -r /tmp/cabid-smoke-rules.json -q \
 		-o /tmp/cabid-smoke-rules-report.json
 	$(CABID) doctor -f json > /tmp/cabid-doctor.json
+	$(CABID) hunt 'event_type = file_write' datasets/synthetic/tree-example.jsonl --limit 1
+	$(CABID) diff /tmp/cabid-smoke.json /tmp/cabid-smoke-rules-report.json -f json \
+		-o /tmp/cabid-smoke-diff.json
+	$(CABID) coverage --events datasets/synthetic/tree-example.jsonl -o /tmp/cabid-smoke-coverage.json
+	$(CABID) graph datasets/synthetic/tree-example.jsonl -f graphml -o /tmp/cabid-smoke.graphml
+	$(CABID) history --db /tmp/cabid-smoke-history.sqlite3 --stats -f json \
+		> /tmp/cabid-smoke-history.json
 	@echo "smoke: ok"
 
 build: install ## build sdist and wheel

@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 SCHEMA_VERSION = 1
@@ -76,6 +76,9 @@ def _summary(report: dict) -> dict:
             for item in (report.get("entities") or {}).get("top_entities", [])[:5]
         ],
         "policy_findings": (report.get("policy") or {}).get("finding_count", 0),
+        "rule_ids": sorted({str(item.get("rule_id"))
+                            for item in (report.get("rules") or {}).get("findings", [])
+                            if item.get("rule_id")}),
         "windowed_worst": ((report.get("windowed") or {}).get("summary") or {}).get("worst_status"),
     }
 
@@ -197,6 +200,160 @@ def record_containment(path: str | Path, process_id: int, action: str,
         return int(cursor.lastrowid or 0)
     finally:
         connection.close()
+
+
+def _parse_created(value: str) -> datetime:
+    """Parse a stored ``created_at``; naive values are treated as UTC."""
+    try:
+        parsed = datetime.fromisoformat(str(value))
+    except ValueError as exc:
+        raise HistoryError(f"unreadable created_at value: {value!r}") from exc
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+def _summary_rule_codes(summary: object) -> list[str]:
+    """Rule ids recorded in a stored summary, tolerating older/unknown shapes."""
+    try:
+        payload = json.loads(summary) if isinstance(summary, str) else summary
+    except (TypeError, ValueError):
+        return []
+    if not isinstance(payload, dict):
+        return []
+    codes = []
+    for entry in payload.get("rule_ids") or []:
+        text = str(entry).strip()
+        if text:
+            codes.append(text)
+    return codes
+
+
+def history_stats(path: str | Path = DEFAULT_DB) -> dict:
+    """Counts and time span for one history database.
+
+    This is a convenience store, not an audit log: the numbers describe what the
+    file currently says, and anyone with write access could have changed it.
+    """
+    existed = Path(path).exists()
+    connection = _connect(path)
+    try:
+        rows = connection.execute(
+            "SELECT status, created_at, anomaly_score, summary FROM runs").fetchall()
+        containments = connection.execute(
+            "SELECT COUNT(*) FROM containments").fetchone()[0]
+        schema = connection.execute(
+            "SELECT value FROM meta WHERE key = 'schema_version'").fetchone()
+    finally:
+        connection.close()
+    status_counts: dict[str, int] = {}
+    timestamps = []
+    scores = []
+    rule_codes: dict[str, int] = {}
+    for status, created_at, score, summary in rows:
+        status_counts[str(status)] = status_counts.get(str(status), 0) + 1
+        timestamps.append(_parse_created(created_at))
+        scores.append(float(score))
+        for code in _summary_rule_codes(summary):
+            rule_codes[code] = rule_codes.get(code, 0) + 1
+    destination = Path(path)
+    return {
+        "format": "cabid-history-stats/1",
+        "db": str(destination),
+        "exists": existed,
+        "schema_version": int(schema[0]) if schema else SCHEMA_VERSION,
+        "run_count": len(rows),
+        "containment_count": int(containments),
+        "status_counts": dict(sorted(status_counts.items())),
+        "first_run_at": min(timestamps).isoformat(timespec="seconds") if timestamps else None,
+        "last_run_at": max(timestamps).isoformat(timespec="seconds") if timestamps else None,
+        "max_anomaly_score": round(max(scores), 6) if scores else None,
+        "rule_matches_by_code": dict(sorted(rule_codes.items())),
+        "db_bytes": destination.stat().st_size if destination.exists() else 0,
+        "note": "summary metrics only; no event content, command lines, or addresses are stored",
+    }
+
+
+def prune_history(path: str | Path = DEFAULT_DB, *, keep_last: int | None = None,
+                  older_than_days: float | None = None, dry_run: bool = True,
+                  vacuum: bool = False, now: datetime | None = None) -> dict:
+    """Delete stored runs matching a retention rule.
+
+    At least one rule is required, and nothing is deleted unless ``dry_run`` is
+    False — a pruning command that can be run by accident is a data-loss bug
+    waiting for a typo. The newest ``keep_last`` runs are always retained, even
+    when they are older-wise eligible, so "keep 10 and drop anything over 30 days"
+    cannot empty the table.
+    """
+    if keep_last is None and older_than_days is None:
+        raise HistoryError("pruning needs --keep and/or --older-than-days; refusing to guess")
+    if keep_last is not None:
+        if isinstance(keep_last, bool) or not isinstance(keep_last, int) or keep_last < 1:
+            raise HistoryError("keep_last must be a positive integer")
+    if older_than_days is not None:
+        if isinstance(older_than_days, bool) or not isinstance(older_than_days, (int, float)) \
+                or older_than_days <= 0:
+            raise HistoryError("older_than_days must be a positive number of days")
+    cutoff = None
+    if older_than_days is not None:
+        reference = now or datetime.now(timezone.utc)
+        if reference.tzinfo is None:
+            reference = reference.replace(tzinfo=timezone.utc)
+        cutoff = reference - timedelta(days=float(older_than_days))
+
+    connection = _connect(path)
+    try:
+        rows = connection.execute(
+            "SELECT id, label, created_at, status FROM runs ORDER BY id DESC").fetchall()
+        retained = {row[0] for row in rows[:keep_last]} if keep_last is not None else set()
+        selected = []
+        for row_id, label, created_at, status in rows:
+            if row_id in retained:
+                continue
+            if cutoff is not None and _parse_created(created_at) >= cutoff:
+                continue
+            selected.append({"id": row_id, "label": label, "created_at": created_at,
+                             "status": status})
+        if not dry_run and selected:
+            connection.executemany("DELETE FROM runs WHERE id = ?",
+                                   [(row["id"],) for row in selected])
+            connection.commit()
+    except sqlite3.DatabaseError as exc:
+        raise HistoryError(f"cannot prune history: {exc}") from exc
+    finally:
+        connection.close()
+
+    if vacuum and not dry_run:
+        # VACUUM cannot run inside a transaction; a fresh connection is the simple
+        # way to be sure the file is actually compacted.
+        connection = _connect(path)
+        try:
+            connection.executescript("VACUUM;")
+            connection.close()
+        except sqlite3.DatabaseError as exc:
+            raise HistoryError(f"cannot vacuum history: {exc}") from exc
+
+    return {
+        "format": "cabid-history-prune/1",
+        "db": str(path),
+        "dry_run": bool(dry_run),
+        "keep_last": keep_last,
+        "older_than_days": older_than_days,
+        "cutoff": cutoff.isoformat(timespec="seconds") if cutoff else None,
+        "run_count_before": len(rows),
+        "selected": len(selected),
+        "deleted": 0 if dry_run else len(selected),
+        "runs": selected[:50],
+        "truncated": len(selected) > 50,
+        "vacuumed": bool(vacuum and not dry_run),
+        "note": _prune_note(dry_run, len(selected)),
+    }
+
+
+def _prune_note(dry_run: bool, selected: int) -> str:
+    if selected == 0:
+        return "nothing matched the retention rule; the database is unchanged"
+    if dry_run:
+        return "dry run: nothing was deleted; re-run with --apply"
+    return "deleted rows cannot be recovered from this file"
 
 
 def list_containments(path: str | Path, limit: int = 200) -> list[dict]:

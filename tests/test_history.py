@@ -3,7 +3,8 @@ import sqlite3
 import pytest
 
 from cabid.detector import analyze
-from cabid.history import (HistoryError, compare_runs, list_runs, record_run)
+from cabid.history import (HistoryError, compare_runs, history_stats, list_runs,
+                           prune_history, record_run)
 from cabid.ingest import read_jsonl
 
 
@@ -96,3 +97,118 @@ def test_containment_input_is_validated(tmp_path):
         record_containment(db, 0, "kill_process")
     with pytest.raises(ValueError):
         record_containment(db, 5, "   ")
+
+
+def test_stats_describe_an_empty_database(tmp_path):
+    stats = history_stats(tmp_path / "h.sqlite3")
+    assert stats["format"] == "cabid-history-stats/1"
+    assert stats["run_count"] == 0
+    assert stats["first_run_at"] is None
+    assert stats["max_anomaly_score"] is None
+    assert stats["rule_matches_by_code"] == {}
+    assert "no event content" in stats["note"]
+
+
+def test_stats_aggregate_runs(tmp_path):
+    db = tmp_path / "h.sqlite3"
+    calm, noisy = reports()
+    record_run(calm, db, "calm")
+    record_run(noisy, db, "noisy", "datasets/synthetic/suspicious-example.jsonl")
+    stats = history_stats(db)
+    assert stats["run_count"] == 2
+    assert stats["status_counts"]["SUSPICIOUS"] == 1
+    assert stats["max_anomaly_score"] == pytest.approx(noisy["anomaly_score"], abs=1e-6)
+    assert stats["first_run_at"] is not None and stats["last_run_at"] is not None
+    assert "sensitive-write-then-egress" in stats["rule_matches_by_code"]
+    assert stats["db_bytes"] > 0
+
+
+def test_stats_do_not_leak_paths_or_addresses(tmp_path):
+    db = tmp_path / "h.sqlite3"
+    record_run(reports()[1], db, "noisy", "/tmp/secret/input.jsonl")
+    payload = repr(history_stats(db))
+    for needle in ("/etc/shadow", "10.0.0.9", "/tmp/.build/worker"):
+        assert needle not in payload
+
+
+def test_prune_requires_a_rule(tmp_path):
+    with pytest.raises(HistoryError, match="refusing to guess"):
+        prune_history(tmp_path / "h.sqlite3")
+
+
+def test_prune_rejects_negative_keep(tmp_path):
+    db = tmp_path / "h.sqlite3"
+    record_run(reports()[0], db, "calm")
+    with pytest.raises(HistoryError, match="keep_last"):
+        prune_history(db, keep_last=-1)
+
+
+def test_prune_is_a_dry_run_by_default(tmp_path):
+    db = tmp_path / "h.sqlite3"
+    calm, noisy = reports()
+    record_run(calm, db, "calm")
+    record_run(noisy, db, "noisy")
+    preview = prune_history(db, keep_last=1)
+    assert preview["dry_run"] is True
+    assert preview["selected"] == 1
+    assert preview["deleted"] == 0
+    assert [row["label"] for row in preview["runs"]] == ["calm"]
+    assert "nothing was deleted" in preview["note"]
+    assert len(list_runs(db)) == 2
+
+
+def test_prune_applies_and_keeps_the_newest(tmp_path):
+    db = tmp_path / "h.sqlite3"
+    calm, noisy = reports()
+    for label in ("first", "second", "third"):
+        record_run(calm if label != "third" else noisy, db, label)
+    result = prune_history(db, keep_last=2, dry_run=False)
+    assert result["deleted"] == 1
+    assert result["run_count_before"] == 3
+    remaining = [row["label"] for row in list_runs(db)]
+    assert remaining == ["third", "second"]
+    assert "cannot be recovered" in result["note"]
+
+
+def test_prune_older_than_days_respects_keep_last(tmp_path):
+    db = tmp_path / "h.sqlite3"
+    record_run(reports()[0], db, "recent")
+    preview = prune_history(db, keep_last=1, older_than_days=0.000001)
+    assert preview["selected"] == 0
+    assert "nothing matched the retention rule" in preview["note"]
+
+
+def test_prune_selects_only_by_age_when_keep_is_absent(tmp_path):
+    db = tmp_path / "h.sqlite3"
+    record_run(reports()[0], db, "calm")
+    # Backdate the row so an age rule can see it.
+    connection = sqlite3.connect(db)
+    connection.execute("UPDATE runs SET created_at = '2000-01-01T00:00:00+00:00'")
+    connection.commit()
+    connection.close()
+    preview = prune_history(db, older_than_days=1)
+    assert preview["selected"] == 1
+    applied = prune_history(db, older_than_days=1, dry_run=False)
+    assert applied["deleted"] == 1
+    assert list_runs(db) == []
+
+
+def test_prune_reports_an_unreadable_timestamp(tmp_path):
+    db = tmp_path / "h.sqlite3"
+    record_run(reports()[0], db, "calm")
+    connection = sqlite3.connect(db)
+    connection.execute("UPDATE runs SET created_at = 'not-a-date'")
+    connection.commit()
+    connection.close()
+    with pytest.raises(HistoryError, match="created_at"):
+        prune_history(db, older_than_days=1)
+
+
+def test_prune_can_vacuum(tmp_path):
+    db = tmp_path / "h.sqlite3"
+    for index in range(3):
+        record_run(reports()[0], db, f"run-{index}")
+    result = prune_history(db, keep_last=1, dry_run=False, vacuum=True)
+    assert result["deleted"] == 2
+    assert result["vacuumed"] is True
+    assert len(list_runs(db)) == 1

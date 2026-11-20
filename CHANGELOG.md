@@ -7,6 +7,90 @@ All notable changes to CABID are documented here. The format follows
 > **Status:** alpha research prototype. Minor versions may change scoring
 > behaviour; every report carries a `config_digest` so results remain traceable.
 
+## [0.9.0] — 2026-11-20
+
+Five features, all in service of one question: *what does this deployment
+actually know?* Each one can produce an unflattering answer, and the answers are
+printed rather than smoothed over.
+
+### Added
+
+- **Query language** (`cabid/hunt.py`, `cabid hunt`). A parsed filter language for
+  normalized events: `and`/`or`/`not` with real precedence, parentheses, `=`,
+  `!=`, `>`, `>=`, `<`, `<=`, glob `~`/`!~`, `contains`, `in [...]`, field aliases,
+  and `--group-by` rollups. Malformed queries exit `2` naming the column and token;
+  `--fail-if-match` exits `1` so a hunt can gate CI.
+  - Deliberate design point: **a field absent from every event is reported**, not
+    quietly treated as "no matches". A typo'd field and a quiet host look
+    identical in output, so the receipt carries `field_presence` plus a note.
+  - Numeric fields compare numerically; text fields compare as text, so
+    `target = 443` is a literal string match and not a hidden port-suffix match.
+- **Report diffing** (`cabid/reportdiff.py`, `cabid diff`). Compares two report
+  files — session or stream — across status, score, per-component deltas, reason
+  codes, rule matches, policy findings, process sets, and missing event classes.
+  Text, Markdown, and JSON output; `--fail-on-regression` and `--fail-on-change`
+  for CI.
+  - **A changed score is never called a regression across a different
+    `config_digest`.** Instead the diff is `not-comparable` with
+    `score_delta: null` and a warning, because a config edit moves every score.
+  - `INSUFFICIENT_EVIDENCE` gets its own verdicts: `evidence-lost` (counts as a
+    regression for the exit code, never as an improvement) and `evidence-gained`.
+  - Session and stream reports are not compared against each other; the "score"
+    fields are different quantities.
+- **Coverage audit** (`cabid/coverage.py`, `cabid coverage`). Derives the
+  rule × event-class × ATT&CK matrix from the *loaded* pack, the completeness
+  config, the policy, and an optional baseline, and reports
+  `classes_without_rules`, `optional_classes_not_gated`,
+  `rules_unreachable_from_observed`, `rules_without_mitre_hint`, and
+  `observed_classes_missing_but_required`. `--fail-on-gap` for pipelines.
+  - `heartbeat` is excluded from "uncovered behavioural class": it is liveness
+    telemetry the gate requires, and a rule for it would be noise.
+- **Process-graph export** (`cabid/graph.py`, `cabid graph`). DOT, Mermaid,
+  GraphML 1.0, and JSON export of the observed graph, with baseline-unseen edges
+  marked, truncated exports reported (`truncated`, `omitted_nodes`), and cycles
+  detected by SCC analysis.
+- **History stats and retention** (`cabid history --stats`, `--prune`). Run counts,
+  containment count, status distribution, time span, highest score, per-rule hit
+  counts, schema version, and file size; plus a pruning command that requires an
+  explicit rule, **defaults to a dry run**, always retains the newest `--keep`
+  runs, and can `VACUUM` on a fresh connection.
+
+### Changed
+
+- `cabid history` now accepts `--stats` and `--prune` in addition to `--show` and
+  `--compare`.
+- Run summaries recorded in the history database now include the matched rule ids
+  (`summary.rule_ids`), which is what makes `--stats` per-rule counts possible.
+  Existing rows keep working and simply count as zero for that field.
+- `cabid/tree.py`'s ancestry helpers are now public (`observed_labels`,
+  `observed_parents`, `baseline_edges`) so the graph exporter can reuse them
+  instead of duplicating the resolution rules.
+- `cabid/graph.py` node records carry `name`, `events`, `writes`, `event_count`,
+  `event_types`, `executable`, and first/last targets; formats were rewritten to
+  emit them.
+- Type annotations added to `cabid/advanced.py` and `cabid/coverage.py` so the
+  strict mypy gate stays green.
+
+### Fixed
+
+- `cabid/reportdiff.py` no longer prints an empty "components" section for
+  unchanged reports.
+- History prune notes no longer claim "nothing was deleted" when nothing was
+  *selected*; the two cases are now distinguished.
+
+### Verified / not verified
+
+- Verified in this environment: `pytest` (all tests), `pyflakes cabid tests`,
+  `mypy cabid`, and `coverage` total ≥ 90%. Every new module has unit tests and a
+  CLI test.
+- **Not verified:** none of the five features has been exercised against real
+  host telemetry. `hunt`, `diff`, `coverage`, and `graph` are demonstrated on the
+  synthetic fixtures only. `coverage` in particular measures whether a rule
+  *references* an event class, not whether it fires correctly — a covered class
+  with a mistuned rule still detects nothing, and the docs say so.
+- The `--epsilon` default of 0.01 in `cabid diff` is an uncalibrated constant, and
+  the docs describe it as one.
+
 ## [0.8.0] — 2026-11-13
 
 Eight features, one theme: make CABID's claims measurable instead of asserted.

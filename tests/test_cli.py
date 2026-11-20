@@ -935,3 +935,164 @@ def test_ebpf_cli_parse_fails_on_errors_without_keep_errors(tmp_path, capsys):
 def test_ebpf_cli_parse_requires_an_input(capsys):
     assert main(["ebpf", "parse"]) == 2
     assert "input file is required" in capsys.readouterr().err
+
+
+# --- hunt / diff / coverage / graph / history stats & prune ----------------
+
+
+def test_hunt_cli_table_json_and_jsonl(tmp_path, capsys):
+    fixture = "datasets/synthetic/tree-example.jsonl"
+    assert main(["hunt", "event_type = file_write", fixture]) == 0
+    out = capsys.readouterr().out
+    assert "matched 1 of 30 events" in out
+    assert "/etc/cron.d/persist" in out
+
+    target = tmp_path / "hits.json"
+    assert main(["hunt", "process_name = cron", fixture, "-f", "json", "-o", str(target)]) == 0
+    payload = json.loads(target.read_text(encoding="utf-8"))
+    assert payload["events_matched"] == 12
+    assert payload["truncated"] is False
+    assert "written to" in capsys.readouterr().out
+
+    assert main(["hunt", "process_name = cron", fixture, "-f", "jsonl", "--limit", "2"]) == 0
+    lines = capsys.readouterr().out.strip().splitlines()
+    assert len(lines) == 2
+    assert json.loads(lines[0])["process_name"] == "cron"
+
+
+def test_hunt_cli_group_by_and_fail_if_match(capsys):
+    fixture = "datasets/synthetic/tree-example.jsonl"
+    assert main(["hunt", "event_type = process_start", fixture, "--group-by",
+                 "process_name", "--limit", "0"]) == 0
+    assert "grouped by process_name" in capsys.readouterr().out
+
+    assert main(["hunt", "process_name = cron", fixture, "--fail-if-match", "--limit", "0"]) == 1
+    capsys.readouterr()
+    assert main(["hunt", "process_name = nothing-here", fixture, "--fail-if-match"]) == 0
+
+
+def test_hunt_cli_rejects_bad_queries(tmp_path, capsys):
+    fixture = "datasets/synthetic/tree-example.jsonl"
+    assert main(["hunt", "event_type =", fixture]) == 2
+    assert "expected a value" in capsys.readouterr().err
+    assert main(["hunt", "event_type = process_start", fixture, "--fields", "nope"]) == 2
+    assert "unknown field" in capsys.readouterr().err
+
+
+def test_diff_cli_text_markdown_and_json(tmp_path, capsys):
+    calm = tmp_path / "calm.json"
+    noisy = tmp_path / "noisy.json"
+    assert main(["analyze", "datasets/synthetic/example.jsonl", "-o", str(calm), "-q"]) == 0
+    assert main(["analyze", "datasets/synthetic/suspicious-example.jsonl",
+                 "-o", str(noisy), "-q"]) == 0
+    capsys.readouterr()
+
+    assert main(["diff", str(calm), str(noisy)]) == 0
+    text = capsys.readouterr().out
+    assert "CABID report diff" in text
+    assert "events" in text
+
+    assert main(["diff", str(calm), str(calm), "--format", "md"]) == 0
+    assert "# CABID report diff — unchanged" in capsys.readouterr().out
+
+    target = tmp_path / "diff.json"
+    assert main(["diff", str(calm), str(noisy), "-f", "json", "-o", str(target)]) == 0
+    payload = json.loads(target.read_text(encoding="utf-8"))
+    assert payload["verdict"] == "regression"
+    assert payload["score_delta"] > 0
+
+
+def test_diff_cli_exit_codes(tmp_path, capsys):
+    calm = tmp_path / "calm.json"
+    noisy = tmp_path / "noisy.json"
+    assert main(["analyze", "datasets/synthetic/example.jsonl", "-o", str(calm), "-q"]) == 0
+    assert main(["analyze", "datasets/synthetic/suspicious-example.jsonl",
+                 "-o", str(noisy), "-q"]) == 0
+    capsys.readouterr()
+
+    assert main(["diff", str(calm), str(noisy), "--fail-on-regression"]) == 1
+    capsys.readouterr()
+    assert main(["diff", str(calm), str(calm), "--fail-on-regression"]) == 0
+    capsys.readouterr()
+    assert main(["diff", str(calm), str(noisy), "--fail-on-change"]) == 1
+    capsys.readouterr()
+    assert main(["diff", str(tmp_path / "missing.json"), str(noisy)]) == 2
+    assert "cabid: error" in capsys.readouterr().err
+
+
+def test_diff_cli_rejects_non_reports(tmp_path, capsys):
+    junk = tmp_path / "junk.json"
+    junk.write_text('{"hello": "world"}', encoding="utf-8")
+    broken = tmp_path / "broken.json"
+    broken.write_text("{not json", encoding="utf-8")
+    assert main(["diff", str(junk), str(junk)]) == 2
+    assert "CABID report" in capsys.readouterr().err
+    assert main(["diff", str(broken), str(junk)]) == 2
+    assert "invalid JSON" in capsys.readouterr().err
+
+
+def test_coverage_cli_json_markdown_and_gap_exit(tmp_path, capsys):
+    assert main(["coverage"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["format"] == "cabid-coverage/1"
+    assert payload["gaps"]["classes_without_rules"] == []
+
+    target = tmp_path / "coverage.md"
+    assert main(["coverage", "--events", "datasets/synthetic/tree-example.jsonl",
+                 "-f", "md", "-o", str(target)]) == 0
+    assert "# CABID coverage" in target.read_text(encoding="utf-8")
+
+    assert main(["coverage", "--events", "datasets/synthetic/tree-example.jsonl",
+                 "--fail-on-gap"]) == 1
+    capsys.readouterr()
+    assert main(["coverage", "--fail-on-gap"]) == 0
+
+
+def test_graph_cli_formats(tmp_path, capsys):
+    fixture = "datasets/synthetic/tree-example.jsonl"
+    assert main(["graph", fixture]) == 0
+    assert "digraph cabid_process_graph {" in capsys.readouterr().out
+
+    assert main(["graph", fixture, "-f", "mermaid"]) == 0
+    assert "flowchart TD" in capsys.readouterr().out
+
+    target = tmp_path / "graph.graphml"
+    assert main(["graph", fixture, "-f", "graphml", "-o", str(target)]) == 0
+    assert "<graphml" in target.read_text(encoding="utf-8")
+    assert "written to" in capsys.readouterr().out
+
+    assert main(["graph", fixture, "-f", "json", "--max-nodes", "2"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["truncated"] is True
+    assert payload["node_count"] == 2
+
+
+def test_history_stats_and_prune_cli(tmp_path, capsys):
+    db = tmp_path / "history.sqlite3"
+    for index, fixture in enumerate(("example.jsonl", "suspicious-example.jsonl",
+                                     "example.jsonl")):
+        assert main(["analyze", f"datasets/synthetic/{fixture}", "--history-db", str(db),
+                     "--save-history", "--label", f"run-{index}", "-q",
+                     "-o", str(tmp_path / f"r{index}.json")]) == 0
+    capsys.readouterr()
+
+    assert main(["history", "--db", str(db), "--stats", "-f", "json"]) == 0
+    stats = json.loads(capsys.readouterr().out)
+    assert stats["run_count"] == 3
+    assert stats["status_counts"]["SUSPICIOUS"] == 1
+
+    assert main(["history", "--db", str(db), "--stats"]) == 0
+    assert "Runs: 3" in capsys.readouterr().out
+
+    assert main(["history", "--db", str(db), "--prune", "--keep", "1"]) == 0
+    preview = capsys.readouterr().out
+    assert "dry run" in preview
+    assert "Selected: 2" in preview
+
+    assert main(["history", "--db", str(db), "--prune", "--keep", "1", "--apply",
+                 "-f", "json"]) == 0
+    applied = json.loads(capsys.readouterr().out)
+    assert applied["deleted"] == 2
+
+    assert main(["history", "--db", str(db)]) == 0
+    assert "run-2" in capsys.readouterr().out

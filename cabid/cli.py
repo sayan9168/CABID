@@ -21,6 +21,9 @@ from .calibrate import (
     write_calibration,
 )
 from .config import ConfigError, config_template, load_config
+from .coverage import (analyse_coverage, has_gaps, observed_classes_from_events,
+                       render_markdown as render_markdown_coverage)
+from .graph import FORMATS as GRAPH_FORMATS, process_graph, render as render_graph
 from .corpus import CorpusError, catalogue as corpus_catalogue, fetch as corpus_fetch
 from .detector import analyze, analyze_windows, explain_score, render_score_explanation
 from .alerting import (
@@ -46,12 +49,17 @@ from .fleet import (
     render_markdown as render_fleet_markdown,
 )
 from .explain import FORMATS, render, render_json
-from .history import DEFAULT_DB, HistoryError, compare_runs, list_runs, record_run
+from .history import (DEFAULT_DB, HistoryError, compare_runs, history_stats, list_runs,
+                      prune_history, record_run)
+from .hunt import HuntError, render_table as render_hunt_table, run_query
 from .ingest import normalize_many, read_jsonl
 from .normalize import EventError
 from .novelty import NoveltyError, drift as drift_report, validate as validate_baseline
 from .policy import PolicyError, evaluate_policy, load_policy
 from .realworld import run_adfa_benchmark
+from .reportdiff import (compare_reports, is_regression,
+                         render_markdown as render_diff_markdown,
+                         render_text as render_diff_text)
 from .host_benchmark import (
     collect_host_events,
     default_config,
@@ -182,12 +190,76 @@ def _build_parser() -> argparse.ArgumentParser:
     seal.add_argument("--output", "-o")
     seal.add_argument("--quiet", "-q", action="store_true")
 
-    hist = sub.add_parser("history", help="list or inspect recorded runs")
+    hunt = sub.add_parser(
+        "hunt",
+        help="query events with a validated filter language")
+    hunt.add_argument("query", help="filter expression, e.g. 'event_type = file_write "
+                                    "and process_name ~ \"*sh\"'")
+    hunt.add_argument("input", help="JSONL event file")
+    hunt.add_argument("--group-by", metavar="FIELD",
+                      help="also roll matches up by a field (counts only)")
+    hunt.add_argument("--fields", metavar="A,B,C", help="columns for --format table")
+    hunt.add_argument("--limit", type=int, default=50,
+                      help="matched events to list (0 = all; default 50)")
+    hunt.add_argument("--format", "-f", choices=("table", "json", "jsonl"), default="table")
+    hunt.add_argument("--output", "-o", help="write the result here instead of stdout")
+    hunt.add_argument("--fail-if-match", action="store_true",
+                      help="exit 1 when at least one event matches")
+
+    rep_diff = sub.add_parser("diff", help="compare two CABID reports")
+    rep_diff.add_argument("before", help="older report JSON")
+    rep_diff.add_argument("after", help="newer report JSON")
+    rep_diff.add_argument("--format", "-f", choices=("text", "md", "json"), default="text")
+    rep_diff.add_argument("--output", "-o")
+    rep_diff.add_argument("--epsilon", type=float, default=0.01,
+                          help="score change treated as noise (default 0.01)")
+    rep_diff.add_argument("--fail-on-regression", action="store_true",
+                          help="exit 1 when risk worsened, evidence was lost, or the "
+                               "score rose by more than --epsilon")
+    rep_diff.add_argument("--fail-on-change", action="store_true",
+                          help="exit 1 on any difference at all")
+
+    cov = sub.add_parser(
+        "coverage",
+        help="show what the rule pack, policy and sensor can actually see")
+    cov.add_argument("--rules", "-r", help="rule pack (default: built-in)")
+    cov.add_argument("--policy", "-p", help="detection policy JSON")
+    cov.add_argument("--config", "-c", help="analysis configuration JSON")
+    cov.add_argument("--baseline", "-b", help="baseline profile (novelty coverage)")
+    cov.add_argument("--events", metavar="JSONL",
+                     help="observed event classes from this file constrain reachability")
+    cov.add_argument("--format", "-f", choices=("json", "md"), default="json")
+    cov.add_argument("--output", "-o")
+    cov.add_argument("--fail-on-gap", action="store_true",
+                     help="exit 1 when a class has no rule or a rule cannot fire")
+
+    graph = sub.add_parser(
+        "graph",
+        help="export the observed process graph as dot, mermaid, graphml or json")
+    graph.add_argument("input", help="JSONL event file")
+    graph.add_argument("--format", "-f", choices=GRAPH_FORMATS, default="dot")
+    graph.add_argument("--output", "-o")
+    graph.add_argument("--baseline", "-b", help="baseline profile; marks unseen edges")
+    graph.add_argument("--max-nodes", type=int, default=500,
+                       help="maximum nodes to export (default 500)")
+
+    hist = sub.add_parser("history", help="list, inspect, or prune recorded runs")
     hist.add_argument("--db", default=DEFAULT_DB)
     hist.add_argument("--limit", type=int, default=20)
     hist.add_argument("--show", type=int, metavar="RUN_ID", help="print the stored summary for a run")
     hist.add_argument("--compare", nargs=2, type=int, metavar=("RUN_A", "RUN_B"),
                       help="diff two stored runs")
+    hist.add_argument("--stats", action="store_true", help="counts, time span and file size")
+    hist.add_argument("--prune", action="store_true",
+                      help="delete stored runs matching a retention rule")
+    hist.add_argument("--keep", type=int, metavar="N",
+                      help="with --prune: always retain the newest N runs")
+    hist.add_argument("--older-than-days", type=float, metavar="DAYS",
+                      help="with --prune: select runs created more than DAYS ago")
+    hist.add_argument("--apply", action="store_true",
+                      help="with --prune: actually delete (default is a dry run)")
+    hist.add_argument("--vacuum", action="store_true",
+                      help="with --prune --apply: compact the database afterwards")
     hist.add_argument("--format", "-f", choices=("json", "md"), default="md")
 
     collect = sub.add_parser("collect-proc", help="poll visible Linux process metadata from /proc")
@@ -961,7 +1033,148 @@ def _cmd_seal(args) -> int:
     return 0
 
 
+def _read_json_report(path: str) -> dict:
+    source = Path(path)
+    try:
+        payload = json.loads(source.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"{source}: invalid JSON: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise ValueError(f"{source}: report must be a JSON object")
+    return payload
+
+
+def _write_payload(payload: str, output: str | None, note: str | None = None) -> None:
+    if output:
+        destination = Path(output)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_text(payload, encoding="utf-8")
+        if note:
+            sys.stdout.write(f"CABID: {note} written to {destination}\n")
+    else:
+        sys.stdout.write(payload)
+
+
+def _cmd_hunt(args) -> int:
+    from .hunt import resolve_field
+
+    events = read_jsonl(args.input)
+    fields = None
+    if args.fields:
+        fields = [resolve_field(part.strip()) for part in args.fields.split(",") if part.strip()]
+        if not fields:
+            raise HuntError("--fields named no columns")
+    result = run_query(events, args.query, group_by=args.group_by, limit=args.limit)
+    if args.format == "jsonl":
+        payload = "".join(json.dumps(event, sort_keys=True) + "\n" for event in result["events"])
+    elif args.format == "json":
+        payload = render_json(result) + "\n"
+    else:
+        payload = render_hunt_table(result, fields)
+    # jsonl is raw data: keep stdout pipe-clean, note only for human formats.
+    note = None if args.format == "jsonl" and not args.output else f"hunt ({args.format})"
+    _write_payload(payload, args.output, note=note)
+    if args.fail_if_match and result["events_matched"] > 0:
+        return 1
+    return 0
+
+
+def _cmd_diff(args) -> int:
+    before = _read_json_report(args.before)
+    after = _read_json_report(args.after)
+    diff = compare_reports(before, after, epsilon=args.epsilon,
+                           before_origin=args.before, after_origin=args.after)
+    if args.format == "json":
+        payload = render_json(diff) + "\n"
+    elif args.format == "md":
+        payload = render_diff_markdown(diff)
+    else:
+        payload = render_diff_text(diff)
+    _write_payload(payload, args.output, note=f"report diff ({diff['verdict']})")
+    if args.fail_on_change and diff["verdict"] != "unchanged":
+        return 1
+    if args.fail_on_regression and is_regression(diff):
+        return 1
+    return 0
+
+
+def _cmd_coverage(args) -> int:
+    report = analyse_coverage(
+        rules=load_rules(args.rules),
+        policy=load_policy(args.policy),
+        config=load_config(args.config),
+        observed_classes=(observed_classes_from_events(read_jsonl(args.events))
+                          if args.events else None),
+        profile=(load_profile(args.baseline) if args.baseline else None),
+    )
+    payload = (render_markdown_coverage(report) if args.format == "md"
+               else render_json(report) + "\n")
+    _write_payload(payload, args.output, note="coverage report")
+    if args.fail_on_gap and has_gaps(report):
+        return 1
+    return 0
+
+
+def _cmd_graph(args) -> int:
+    profile = load_profile(args.baseline) if args.baseline else None
+    graph = process_graph(read_jsonl(args.input), profile, max_nodes=args.max_nodes)
+    payload = render_graph(graph, args.format)
+    _write_payload(payload, args.output, note=f"graph ({args.format})")
+    return 0
+
+
+def _history_stats_markdown(stats: dict) -> str:
+    score = stats["max_anomaly_score"]
+    lines = [
+        "# CABID history stats", "",
+        f"- Database: `{stats['db']}`",
+        f"- Runs: {stats['run_count']}",
+        f"- Containment records: {stats['containment_count']}",
+        f"- First run: {stats['first_run_at'] or '—'}",
+        f"- Last run: {stats['last_run_at'] or '—'}",
+        f"- Highest anomaly score: {'—' if score is None else f'{score:.3f}'}",
+        f"- Schema version: {stats['schema_version']}",
+        f"- File size: {stats['db_bytes']} bytes",
+        "",
+        f"> {stats['note']}",
+    ]
+    if stats["status_counts"]:
+        lines += ["", "| Status | Runs |", "| --- | --- |"]
+        lines += [f"| {name} | {count} |" for name, count in stats["status_counts"].items()]
+    return "\n".join(lines) + "\n"
+
+
+def _prune_markdown(result: dict) -> str:
+    lines = ["# CABID history prune", "",
+             f"- Database: `{result['db']}`",
+             f"- Mode: {'dry run (nothing deleted)' if result['dry_run'] else 'applied'}",
+             f"- Runs before: {result['run_count_before']}",
+             f"- Selected: {result['selected']}",
+             f"- Deleted: {result['deleted']}"]
+    if result["runs"]:
+        lines += ["", "| Run | Label | Created | Status |", "| --- | --- | --- | --- |"]
+        for row in result["runs"]:
+            lines.append(f"| {row['id']} | {row['label']} | {row['created_at']} | "
+                         f"{row['status']} |")
+    lines += ["", f"> {result['note']}"]
+    return "\n".join(lines) + "\n"
+
+
 def _cmd_history(args) -> int:
+    if args.stats:
+        stats = history_stats(args.db)
+        payload = (render_json(stats) + "\n" if args.format == "json"
+                   else _history_stats_markdown(stats))
+        _write_payload(payload, None)
+        return 0
+    if args.prune:
+        result = prune_history(args.db, keep_last=args.keep,
+                               older_than_days=args.older_than_days,
+                               dry_run=not args.apply, vacuum=args.vacuum)
+        payload = (render_json(result) + "\n" if args.format == "json"
+                   else _prune_markdown(result))
+        _write_payload(payload, None)
+        return 0
     if args.compare:
         first, second = args.compare
         connection_report = {"runs": list_runs(args.db, limit=10)}
@@ -973,11 +1186,12 @@ def _cmd_history(args) -> int:
             right = _load_row(connection, second)
         finally:
             connection.close()
-        payload = {"comparison": _compare_stored(left, right), "context": connection_report}
+        comparison_payload = {"comparison": _compare_stored(left, right),
+                              "context": connection_report}
         if args.format == "json":
-            sys.stdout.write(render_json(payload) + "\n")
+            sys.stdout.write(render_json(comparison_payload) + "\n")
         else:
-            comparison = payload["comparison"]
+            comparison = comparison_payload["comparison"]
             sys.stdout.write(f"# CABID history comparison\n\n"
                              f"| Field | Run {first} | Run {second} | Delta |\n| --- | --- | --- | --- |\n"
                              f"| Status | {comparison['left']['status']} | {comparison['right']['status']} | "
@@ -1321,6 +1535,14 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.command == "analyze":
             return _cmd_analyze(args)
+        if args.command == "hunt":
+            return _cmd_hunt(args)
+        if args.command == "diff":
+            return _cmd_diff(args)
+        if args.command == "coverage":
+            return _cmd_coverage(args)
+        if args.command == "graph":
+            return _cmd_graph(args)
         if args.command == "history":
             return _cmd_history(args)
         if args.command == "timeline":
