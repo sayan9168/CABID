@@ -27,7 +27,7 @@ MAX_FINDINGS = 40
 DEEP_CHAIN_THRESHOLD = 6
 
 
-def _labels(events: list[dict]) -> dict[int, str]:
+def observed_labels(events: list[dict]) -> dict[int, str]:
     """Most frequently reported name per pid, falling back to unknown."""
     counts: dict[int, Counter] = defaultdict(Counter)
     for event in events:
@@ -37,7 +37,7 @@ def _labels(events: list[dict]) -> dict[int, str]:
     return {pid: counter.most_common(1)[0][0] for pid, counter in counts.items()}
 
 
-def _edges(events: list[dict]) -> dict[int, int]:
+def observed_parents(events: list[dict]) -> dict[int, int]:
     """Resolve one parent per pid (most frequently reported, then smallest)."""
     candidates: dict[int, Counter] = defaultdict(Counter)
     for event in events:
@@ -52,8 +52,8 @@ def _edges(events: list[dict]) -> dict[int, int]:
 
 def process_tree(events: list[dict], profile: dict | None = None) -> dict:
     """Build the observed process tree and report structural findings."""
-    labels = _labels(events)
-    parents = _edges(events)
+    labels = observed_labels(events)
+    parents = observed_parents(events)
     pids = {event["process_id"] for event in events}
     children: dict[int, set[int]] = defaultdict(set)
     roots = []
@@ -66,7 +66,7 @@ def process_tree(events: list[dict], profile: dict | None = None) -> dict:
 
     depths = _depths(roots, children)
     cycles = _cycles(pids, parents)
-    known_edges = _baseline_edges(profile)
+    known_edges = baseline_edges(profile)
 
     findings: list[dict] = []
     edge_counts: Counter[tuple[str, str]] = Counter()
@@ -166,7 +166,7 @@ def _cycles(pids: set[int], parents: dict[int, int]) -> list[int]:
     return in_cycle
 
 
-def _baseline_edges(profile: dict | None) -> set[tuple[str, str]] | None:
+def baseline_edges(profile: dict | None) -> set[tuple[str, str]] | None:
     if not profile:
         return None
     stored = profile.get("parent_child")

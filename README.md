@@ -4,7 +4,7 @@
 
 CABID combines temporal activity, conservative process ancestry checks, and telemetry-class completeness over normalized event streams. It reports insufficient evidence when required event classes are absent.
 
-> Research status: alpha research prototype (v0.8.0). Novelty and real-world detection performance are not established. Scores are heuristics, not probabilities.
+> Research status: alpha research prototype (v0.9.0). Novelty and real-world detection performance are not established. Scores are heuristics, not probabilities.
 
 ## Features
 
@@ -69,6 +69,19 @@ CABID combines temporal activity, conservative process ancestry checks, and tele
   see the docs)
 - **Interactive dashboard tabs**: process graph with search/collapse/tooltips,
   event-density timeline, name-level filters
+- **Query language** (`cabid hunt`): validated event filter language with
+  `and`/`or`/`not`, glob and numeric comparisons, `in [...]`, rollups, and a
+  receipt that says which fields were missing instead of quietly matching nothing
+- **Report diffing** (`cabid diff`): verdicts (`regression`, `improvement`,
+  `changed`, `evidence-lost`, `not-comparable`), component-level deltas, and a rule
+  that a score change is never called a regression across a different `config_digest`
+- **Coverage audit** (`cabid coverage`): rule/event-class/ATT&CK matrix stating which
+  classes have no rule, which rules cannot fire against the observed sensor, and
+  which required classes the deployment never emits
+- **Graph export** (`cabid graph`): DOT, Mermaid, GraphML and JSON of the observed
+  process graph, with cycle marking, baseline-unseen edges, and reported truncation
+- **History stats and retention** (`cabid history --stats|--prune`): counts, time
+  span, per-rule hits, and a dry-run-first pruning command
 - CI-friendly exit codes (`--exit-code`, `--fail-on`), automated tests, GitHub Actions
   with lint, type and coverage (>=90%) gates, and a container image
 
@@ -85,6 +98,21 @@ CABID combines temporal activity, conservative process ancestry checks, and tele
     cabid analyze datasets/synthetic/example.jsonl
     cabid analyze datasets/synthetic/example.jsonl --format md -o report.md
     cabid analyze datasets/synthetic/example.jsonl --window 20 --format html -o report.html
+
+## Ask, diff, audit, export
+
+    cabid hunt 'event_type = file_write and process_name ~ "*sh"' events.jsonl
+    cabid diff before.json after.json --fail-on-regression
+    cabid coverage --events events.jsonl --fail-on-gap
+    cabid graph events.jsonl -f mermaid
+    cabid history --stats
+
+`hunt` fails loudly on a malformed query rather than returning nothing, `diff`
+refuses to call a score change a regression when the configuration changed,
+`coverage` reports which classes nothing can fire on, and `graph` exports the
+observed process skeleton for Graphviz, Mermaid, or a graph library. See
+[docs/hunt.md](docs/hunt.md), [docs/report-diff.md](docs/report-diff.md),
+[docs/coverage.md](docs/coverage.md) and [docs/graph.md](docs/graph.md).
 
 ## Interactive dashboard
 
@@ -318,6 +346,10 @@ file_write, network_connect, process_exit, heartbeat. See docs/event-schema.md.
 | docs/entities.md | per-process rollup and its triage semantics |
 | docs/multi-source.md | merging artifacts and time filtering |
 | docs/history.md | local run history and comparisons |
+| docs/hunt.md | query language: grammar, fields, missing-field semantics |
+| docs/report-diff.md | comparing two reports and what a score change means |
+| docs/coverage.md | what the rule pack, policy and sensor can actually see |
+| docs/graph.md | process-graph export in DOT, Mermaid, GraphML, JSON |
 | docs/rules.md | correlation rule format and built-in pack |
 | docs/process-tree.md | tree reconstruction and structural findings |
 | docs/timeline.md | investigation timeline export |

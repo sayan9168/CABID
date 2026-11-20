@@ -13,16 +13,16 @@ Everything below assumes `main` is green on the `tests` workflow: pyflakes, mypy
 
 ## 1. Bump the version in three places
 
-    cabid/__init__.py     __version__ = "0.8.0"
-    pyproject.toml        version = "0.8.0"
-    README.md             "alpha prototype (v0.8.0)"
+    cabid/__init__.py     __version__ = "0.9.0"
+    pyproject.toml        version = "0.9.0"
+    README.md             "alpha prototype (v0.9.0)"
 
 The publish workflow checks that the release tag matches
 `cabid/__init__.py`; a mismatch fails the build before anything is uploaded.
 
 ## 2. Update CHANGELOG.md
 
-Move `## [Unreleased]` to `## [0.8.0] — YYYY-MM-DD`. Keep the existing shape:
+Move `## [Unreleased]` to `## [0.9.0] — YYYY-MM-DD`. Keep the existing shape:
 `Added` / `Changed` / `Fixed`, and say plainly when a change affects a score or a
 report's status. A reader comparing two reports must be able to find out why they
 differ.
@@ -30,9 +30,9 @@ differ.
 ## 3. Merge, then tag
 
     git checkout main && git pull
-    git tag -a v0.8.0 -m "CABID v0.8.0"
-    git push origin v0.8.0
-    gh release create v0.8.0 --title "CABID v0.8.0" --notes-file /tmp/notes.md
+    git tag -a v0.9.0 -m "CABID v0.9.0"
+    git push origin v0.9.0
+    gh release create v0.9.0 --title "CABID v0.9.0" --notes-file /tmp/notes.md
 
 The release notes should repeat the honest status line: alpha prototype,
 heuristics not probabilities, no real-host benchmark.
@@ -66,7 +66,7 @@ real publisher and later releases need no further setup.
 
 ## 5. Verify
 
-    pip download cabid==0.8.0 --no-deps -d /tmp/check
+    pip download cabid==0.9.0 --no-deps -d /tmp/check
     python -m venv /tmp/v && /tmp/v/bin/pip install cabid==0.8.0
     /tmp/v/bin/cabid --version
     /tmp/v/bin/python -m cabid --version

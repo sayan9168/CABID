@@ -56,7 +56,7 @@ def fim_snapshot(root: str, output: str) -> dict[str, Any]:
     base = Path(root).resolve(strict=True)
     if not base.is_dir():
         raise ValueError("FIM root must be a directory")
-    entries = []
+    entries: list[dict[str, Any]] = []
     for path in sorted(base.rglob("*")):
         rel = path.relative_to(base).as_posix()
         if path.is_symlink():
@@ -115,8 +115,8 @@ def sensor_health(input_path: str, expected_interval: float) -> dict[str, Any]:
     if expected_interval <= 0:
         raise ValueError("expected interval must be positive")
     rows = _jsonl(input_path)
-    timestamps = []
-    types = Counter()
+    timestamps: list[float] = []
+    types: Counter[str] = Counter()
     malformed = 0
     for row in rows:
         try:

@@ -107,3 +107,17 @@
   works, not that the detection does.
 - Test only on systems and logs you own or are authorized to analyze. The sample
   dataset uses the reserved `.invalid` domain.
+- `cabid hunt` scans a whole file in memory with a glob matcher. It is a triage
+  tool: no regex, no cross-event conditions, and "no matches" only means the events
+  are not in *that file*. A field missing from every event is reported, but a field
+  present and wrong is indistinguishable from a quiet host.
+- `cabid diff` describes two reports, not two hosts, and only compares scores when
+  the `config_digest` matches. `--epsilon` is a raw distance, not a significance
+  test; the shipped default of 0.01 is not calibrated against any workload.
+- `cabid coverage` measures whether a rule *references* an event class. A covered
+  class with a mistuned rule still detects nothing, and a rule marked reachable can
+  still be dead after a lossy Sigma import.
+- `cabid graph` exports observed pids and reported parent ids. Cycles mark
+  contradictory evidence, not a kernel fact; truncation silently drops the process
+  you may have been looking for unless you read `omitted_nodes`.
+- History pruning is irreversible and keyed on a clock the analyst controls.
